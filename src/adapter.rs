@@ -22,7 +22,10 @@ use crate::binary_manager::{
 };
 
 /// The repository whose pinned releases carry the assets (LOC-0108).
-const RELEASE_REPO: &str = "G-Builds-Here/zatara-netcoredbg";
+/// Public-surface split (2026-10-14): the private dev workspace no longer
+/// publishes; releases are cut from the public extension repo, which ships
+/// the proxy source they build from.
+const RELEASE_REPO: &str = "G-Builds-Here/zatara";
 
 /// Which matrix target the *host machine* is, per what Zed reports through
 /// the host call. The compile-time `PlatformTarget::from_host` cannot answer
