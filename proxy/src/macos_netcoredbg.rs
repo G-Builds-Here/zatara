@@ -1,13 +1,18 @@
-//! macOS netcoredbg discovery (LOC-0116): the macOS branch of the
-//! LOC-0110 resolution point.
+//! macOS netcoredbg discovery (LOC-0116, re-scoped by D28 2026-10-14):
+//! the walk for the Macs the download lane cannot serve.
 //!
-//! The download leg is structurally impossible for this platform — the
-//! release matrix publishes no macOS netcoredbg asset and vendoring one is
-//! ruled out (owner ruling Q3: no official macOS build exists) — so on a
-//! Mac the *proxy* finds the debugger instead of fetching it: the settings
-//! path verbatim first, a PATH walk next, the Homebrew prefix's bin
-//! directory last. Nothing found is not a crash: the guidance names the
-//! install command the user can actually run.
+//! Apple Silicon IS served now — Samsung/netcoredbg publishes an official
+//! osx-arm64 build and the pinned zatara release stages it, so the
+//! extension resolves and names it like every other platform. This module
+//! remains for the rest: Intel Macs (upstream publishes no macOS Intel
+//! build at all — verified 2026-10-14 — and there is no Homebrew formula
+//! either, the 404 that killed the old guidance), plus Apple-Silicon
+//! sessions degraded to no named binary (unreachable release, empty
+//! cache). The *proxy* finds the debugger instead of fetching it: the
+//! settings path verbatim first, a PATH walk next, the Homebrew prefix's
+//! bin directory last (a fine place to FIND a manual install — no formula
+//! to install). Nothing found is not a crash: the guidance names the
+//! manual remedies that exist.
 //!
 //! [`discover`] takes its inputs (PATH, prefixes) and its candidate
 //! predicate as arguments — that seam is what lets the acceptance suite
@@ -18,16 +23,23 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// The remedy an absent netcoredbg is answered with. The exact command the
-/// story's Then clauses quote; [`missing_binary_message`] embeds it.
-pub const BREW_INSTALL_HINT: &str = "brew install netcoredbg";
+/// Where the manual remedy lives: the upstream release page whose
+/// osx-arm64 asset zatara itself serves (and whose absence this walk's
+/// none-found answer explains). The exact URL the guidance tests quote;
+/// [`missing_binary_message`] embeds it. (The retired `brew install
+/// netcoredbg` hint named a formula that does not exist — D28, 2026-10-14.)
+pub const MANUAL_INSTALL_HINT: &str = "https://github.com/Samsung/netcoredbg/releases";
 
-/// The none-found verdict: a message, not a stack — naming the source
-/// that is missing and the one command that installs it.
+/// The none-found verdict: a message, not a stack — naming what was
+/// missing and the manual remedy that actually exists for this Mac.
 pub fn missing_binary_message() -> String {
     format!(
         "zatara: netcoredbg was not found on PATH or under a Homebrew prefix \
-         on this Mac. Install it with: {BREW_INSTALL_HINT}"
+         on this Mac. zatara downloads the official Apple-silicon build \
+         automatically — getting this answer means nothing was named and \
+         nothing was cached yet (and upstream publishes no macOS Intel \
+         build at all). Install netcoredbg manually from {MANUAL_INSTALL_HINT} \
+         (osx-arm64; Intel Macs build from source) and keep it on PATH."
     )
 }
 
@@ -37,7 +49,7 @@ pub fn missing_binary_message() -> String {
 /// running a program to learn a path).
 pub const DEFAULT_BREW_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 
-/// The binary name, as the formula and PATH conventions both spell it.
+/// The binary name, as PATH and manual-install conventions both spell it.
 const NETCOREDBG: &str = "netcoredbg";
 
 /// Arming the Mac discovery branch on non-Mac hosts (tests/CI only —

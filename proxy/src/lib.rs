@@ -16,8 +16,9 @@ pub mod framing;
 // and confined to the extension work dir. Internal — the gates are read at
 // startup here, never driven per-message.
 pub(crate) mod logging;
-// The macOS branch of netcoredbg resolution (LOC-0116): probe PATH and
-// Homebrew where the release matrix cannot ship an asset.
+// The macOS walk (LOC-0116, re-scoped by D28): probe PATH and Homebrew
+// prefixes for the Macs the release matrix cannot ship an asset for —
+// Intel (no upstream build exists) and degraded Apple-Silicon sessions.
 pub mod macos_netcoredbg;
 // pub (not pub(crate)): the real-SDK breadth-count tests drive `build_filter`
 // directly — the filter the runner puts on argv is the filter under test.

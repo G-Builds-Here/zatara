@@ -1,6 +1,6 @@
 [package]
 name = "zatara"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Zed extension for .NET gutter test run/debug via a netcoredbg DAP proxy"
 license = "MIT"

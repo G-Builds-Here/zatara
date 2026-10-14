@@ -34,6 +34,11 @@ const RELEASE_REPO: &str = "G-Builds-Here/zatara";
 /// session (owner repro, 2026-10-13) then looked for `-linux-x64` assets on
 /// a Windows cache and reported "no proxy on this machine". Zed's
 /// `current_platform` is the only truthful source in a wasm guest.
+// The `_` arm is unreachable today — Os×Architecture is exhausted by the
+// five arms above — but stays as the forward-compat answer: a future Os or
+// Architecture variant lands on the honest std-cfg default instead of a
+// compile error in the guest.
+#[allow(unreachable_patterns)]
 pub fn target_for(os: Os, arch: Architecture) -> PlatformTarget {
     match (os, arch) {
         (Os::Windows, _) => PlatformTarget::WinX64,
@@ -146,24 +151,28 @@ pub fn dap_binary_for(
         .map_err(|e| format!("zatara: cannot locate the extension work dir: {e}"))?;
     let fetcher = ExtensionHttpFetcher;
     let (host_os, host_arch) = current_platform();
+    let host_target = target_for(host_os, host_arch);
     let manager = BinaryManager {
         work_dir,
-        target: target_for(host_os, host_arch),
+        target: host_target,
         release_source: ReleaseSource::github_latest(RELEASE_REPO),
         fetcher: &fetcher,
     };
     // Zed's user-configured adapter binary names what Zed would spawn — for
     // zatara that is the proxy, so the override lands there.
     let proxy_override = user_provided_debug_adapter_path.map(Path::new);
-    // The brew-guided branch (LOC-0116): macOS publishes no netcoredbg asset
-    // to download (owner ruling Q3), so the extension never names one —
-    // leaving the argv pair absent arms the proxy's PATH→Homebrew probe,
-    // whose none-found answer is the `brew install netcoredbg` guidance.
-    // Passing the bare default through would count as an explicit source
-    // and silence the walk entirely. The work dir still rides the envs seam
-    // (LOC-0117): the walk decides which binary to name, not where the
-    // default-off gates may write.
-    let name_netcoredbg = !matches!(current_platform().0, Os::Mac);
+    // The Intel-mac branch (LOC-0116, re-scoped by D28 2026-10-14): upstream
+    // publishes no macOS Intel build, so on MacosX64 the extension names no
+    // netcoredbg at all — leaving the argv pair absent arms the proxy's
+    // settings→PATH→Homebrew-prefix probe, whose none-found answer names the
+    // manual remedies. Apple Silicon is NOT that branch anymore: the pinned
+    // release now stages Samsung's official netcoredbg-osx-arm64.zip, so
+    // MacosArm64 resolves and names it exactly like win/linux. Passing the
+    // bare default through would count as an explicit source and silence
+    // the walk entirely. The work dir still rides the envs seam (LOC-0117):
+    // the walk decides which binary to name, not where the default-off
+    // gates may write.
+    let name_netcoredbg = host_target != PlatformTarget::MacosX64;
     dap_binary_with(&manager, proxy_override, config.config.clone(), name_netcoredbg)
 }
 

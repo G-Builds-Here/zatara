@@ -14,7 +14,7 @@ design, the project's maturity ledger, and the development workflow live in
 |------|--------|
 | Zed | A build whose extension API is `zed_extension_api` 0.7 |
 | .NET SDK | `dotnet` reachable on the PATH the adapter inherits |
-| netcoredbg | **Windows / Linux:** official [Samsung/netcoredbg](https://github.com/Samsung/netcoredbg) releases, fetched automatically and SHA256-verified against the version-pinned release manifest. **macOS:** no official binaries exist, so the community Homebrew formula is the source — `brew install netcoredbg` (see [Troubleshooting](#troubleshooting)). |
+| netcoredbg | **Windows / Linux / Apple-silicon macOS:** official [Samsung/netcoredbg](https://github.com/Samsung/netcoredbg) releases, fetched automatically and SHA256-verified against the version-pinned release manifest. **Intel macOS:** upstream publishes no Intel macOS build and no Homebrew formula exists — install netcoredbg manually from the releases page (Apple-silicon asset or source build) and keep it on `PATH` (see [Troubleshooting](#troubleshooting)). |
 | A test project | xunit, nunit, or mstest. The Debug lane finds the project by walking up from the test file's directory until a folder names exactly one project; the Run lane points `dotnet` at the repository root and lets its own solution-or-unique-project rules answer. An ambiguous folder stays dotnet's honest refusal, never a guess — `ZATARA_FUZZY_MATCH=1` lets the Debug lane take the nearest solution instead. |
 
 ## Install
@@ -158,9 +158,10 @@ it names for this extension is the **proxy** — that is the binary Zed spawns:
 }
 ```
 
-There is no **Zed setting** for the netcoredbg path: on Windows and Linux that
-binary comes from the verified cache or the pinned release download, and on
-macOS from your PATH or Homebrew — the chains are in
+There is no **Zed setting** for the netcoredbg path: on Windows, Linux, and
+Apple-silicon macOS that binary comes from the verified cache or the pinned
+release download, and on Intel macOS from your PATH or a Homebrew-prefix
+install (upstream ships no Intel build) — the chains are in
 [binary resolution](#adapter-environment) below. (`dap.<adapter>.args` exists in Zed — leave it
 alone for this adapter. Zed documents it as overriding the arguments it would
 otherwise pass, and this adapter's arguments carry the resolved netcoredbg path,
@@ -212,10 +213,12 @@ names for the proxy:
    stand-in debugger through, and nothing in a normal session ever sets it — it
    is not a supported setting, and if you are not driving those suites you do
    not want it;
-3. nothing named it: plain `netcoredbg` found on your PATH. On macOS the
-   extension deliberately names no path at all, which sends the proxy to probe
-   settings, then PATH, then Homebrew — there is no official macOS build to
-   download ([Troubleshooting](#troubleshooting)).
+3. nothing named it: plain `netcoredbg` found on your PATH. On Intel macOS
+   the extension deliberately names no path at all (upstream ships no Intel
+   build), which sends the proxy to probe settings, then PATH, then Homebrew
+   prefixes — a fine place a manual install can live
+   ([Troubleshooting](#troubleshooting)). Apple-silicon macOS names the
+   official osx-arm64 asset like every other served platform.
 
 ### Debug scenario keys
 
@@ -287,7 +290,7 @@ scope, manual attach) document what a `debug.json` cannot carry.
 | The debug panel never says passed or failed | The run's report card is the **Console** tab: the vstest summary (`Passed! - Failed: 0, ...`) lands there when the session closes. Zed's debug panel carries no test-run state — that is an upstream gap (see [Upstream backlog](#upstream-backlog)), not something an extension can add. |
 | Session runs but the release is unreachable (private repository — GitHub answers 404 to anonymous asset downloads — or offline) | Working as designed: the session runs from the settings override or the cached binaries, and Zed's log carries a `degraded session` note naming what went unverified. Nothing appears in the editor. If there is no proxy on disk at all the session cannot start — point `dap.zatara-netcoredbg.binary` at one, run one session while a release is reachable so the cache fills, or publish the releases anonymously. |
 | "test host did not pause within 30s" | The framework never parked a `testhost`. Confirm the target is a runnable test, or raise `ZATARA_RUNNER_BANNER_TIMEOUT_SECS`. |
-| macOS: netcoredbg not found | `brew install netcoredbg` (community formula). zatara never downloads netcoredbg on macOS — no official macOS build exists to download. |
+| macOS: netcoredbg not found | **Apple-silicon:** zatara downloads the official osx-arm64 build automatically — this message means the pinned release was unreachable and nothing was cached yet; install netcoredbg from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and keep it on `PATH`. **Intel:** upstream publishes no Intel macOS build and there is no Homebrew formula — build netcoredbg from source and put it on `PATH`. |
 | The next build fails with file locks after a stopped session | A test host survived the stop. Retry the session; the proxy records every child it adopts and takes the whole tree down on stop and on crash, so a survivor is a bug worth reporting. |
 
 ## Upstream backlog

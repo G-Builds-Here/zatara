@@ -747,7 +747,9 @@ impl TreeRegistry {
     /// natural end is a no-op, not an error.
     pub(crate) fn kill_all(&self) {
         // Teardown never refuses to run because another thread panicked
-        // holding this lock (see `adopt`).
+        // holding this lock (see `adopt`). The mut is for the Windows
+        // branch's `state.job = None` only — the POSIX build says so.
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Windows first strike: closing the job's last handle asks the
         // kernel itself to terminate every member — no process launch to

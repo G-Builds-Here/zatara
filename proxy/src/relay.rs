@@ -160,9 +160,10 @@ impl AdapterSpec {
     }
 
     fn spawn(&self) -> io::Result<Child> {
-        // A resolved asset may be an archive (both download lanes ship
+        // A resolved asset may be an archive (every download lane ships
         // netcoredbg as one: linux a tar.gz, Windows a zip of exe +
-        // DLLs): materialize names the program the exec may actually
+        // DLLs, macOS arm64 since D28 a zip of the unix binary):
+        // materialize names the program the exec may actually
         // run. Non-archives pass through untouched (AC2).
         let program = crate::asset::materialize(&self.program)?;
         let mut cmd = Command::new(&program);
@@ -185,9 +186,13 @@ fn interpreter_args() -> Vec<String> {
     vec!["--interpreter=vscode".to_string()]
 }
 
-/// Whether this host runs the macOS discovery walk: always on a Mac;
+/// Whether this host may run the macOS discovery walk: always on a Mac;
 /// elsewhere only when the documented test/CI seam arms it (the probe is
 /// host-agnostic logic, so the suite exercises this branch on every OS).
+/// Arming is not walking: since D28 an Apple-Silicon session normally
+/// arrives with netcoredbg NAMED (the release serves osx-arm64), and the
+/// `named` check in [`AdapterSpec::from_env`] skips the walk outright —
+/// the walk's live shapes here are Intel Macs and degraded sessions.
 /// Why a session runs degraded, IF anyone names it. The extension stopped
 /// filling this seam the same day the ruling landed (2026-10-13): the
 /// degraded note lives in logs, never in the session UI, and the extension

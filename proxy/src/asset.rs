@@ -1,7 +1,8 @@
-//! A resolved asset is not always a program: both download lanes publish
+//! A resolved asset is not always a program: every download lane publishes
 //! netcoredbg as an archive (release.yml stages the upstream assets
-//! verbatim — a `.tar.gz` for linux, a `.zip` for Windows, whose runtime
-//! is an exe plus seven sibling DLLs and cannot ship as one file), and
+//! verbatim — a `.tar.gz` for linux, a `.zip` for Windows whose runtime is
+//! an exe plus seven sibling DLLs and cannot ship as one file, and since
+//! D28 a `.zip` for macOS arm64 whose program is a plain unix binary), and
 //! the BinaryManager cache holds exactly those verified bytes. Before the
 //! relay execs its adapter child, `materialize` turns an archive into the
 //! program inside it — once, next to the cache entry, and shared by every
@@ -26,8 +27,11 @@ const ASSET_DIR: &str = ".zatara-assets";
 /// (plus `.exe` on Windows).
 const MEMBER_NAME: &str = "netcoredbg";
 /// The Windows zip always carries the PE image under this name, whatever
-/// OS is reading it — the zip lane exists only because the *published
-/// Windows* asset is an archive, so its program name is fixed, not `cfg`.
+/// OS is reading it — a name fixed by the *published asset*, not `cfg`.
+/// Since D28 the zip lane also serves the macOS arm64 asset, whose program
+/// member is the unix binary under [`MEMBER_NAME`]; `materialize_zip`
+/// picks whichever member the archive actually holds (exe first — a zip
+/// with both is the Windows shape).
 const ZIP_PROGRAM_NAME: &str = "netcoredbg.exe";
 
 /// Quarantine directory for everything extracted from `archive` — derived
@@ -73,9 +77,11 @@ pub fn materialize(program: &Path) -> io::Result<PathBuf> {
     if target.is_file() {
         return Ok(target); // steady state: one stat, no archive read
     }
-    // The zip lane needs its own steady-state stat: its program name is
-    // fixed (`netcoredbg.exe`, the PE image), so on a non-Windows host —
-    // CI's ubuntu runners — the two lanes' targets do not coincide.
+    // The zip lane needs its own steady-state stat: the Windows asset's
+    // program is `netcoredbg.exe` (the PE image), which the gzip lane's
+    // target (`netcoredbg` on unix) never names. The macOS arm64 zip's
+    // program is `netcoredbg` — on a unix host that is the lane target
+    // above, so its steady state needs no separate check.
     let target_zip = zip_target(program);
     if target_zip.is_file() {
         return Ok(target_zip);
@@ -215,15 +221,31 @@ fn materialize_zip(archive: &Path, file: fs::File, target: &Path) -> io::Result<
             io::Error::new(kind, format!("extracting from {}: {e}", archive.display()))
         });
     match unzip {
-        Ok(()) if part_dir.join(ZIP_PROGRAM_NAME).is_file() => {
+        Ok(()) => {
+            // Which program (if any) the zip holds: the Windows PE image,
+            // or — since D28 — the macOS arm64 unix binary. exe first: a
+            // zip holding both is the Windows shape.
+            let program_name = if part_dir.join(ZIP_PROGRAM_NAME).is_file() {
+                ZIP_PROGRAM_NAME
+            } else if part_dir.join(MEMBER_NAME).is_file() {
+                MEMBER_NAME
+            } else {
+                // A zip with no program member is not ours to judge (the
+                // gzip lane says the same of a memberless tar): the path
+                // goes back untouched, and a well-formed-but-empty publish
+                // would have left litter — remove it.
+                discard_tree(assets_dir, &part_dir);
+                return Ok(archive.to_path_buf());
+            };
+            let published = stem_dir.join(program_name);
             match fs::rename(&part_dir, stem_dir) {
-                Ok(()) => Ok(target.to_path_buf()),
+                Ok(()) => Ok(published),
                 Err(e) => {
                     // Only a concurrent winner's published program excuses
                     // a failed rename; anything else is extraction failure
                     // with a name the caller should hear.
-                    if target.is_file() {
-                        Ok(target.to_path_buf())
+                    if published.is_file() {
+                        Ok(published)
                     } else {
                         Err(io::Error::new(
                             e.kind(),
@@ -232,14 +254,6 @@ fn materialize_zip(archive: &Path, file: fs::File, target: &Path) -> io::Result<
                     }
                 }
             }
-        }
-        // A zip with no netcoredbg.exe is not ours to judge (the gzip lane
-        // says the same of a memberless tar): the path goes back untouched,
-        // and a well-formed-but-empty publish still published litter —
-        // remove it.
-        Ok(()) => {
-            discard_tree(assets_dir, &part_dir);
-            Ok(archive.to_path_buf())
         }
         Err(e) => {
             discard_tree(assets_dir, &part_dir);
@@ -264,8 +278,25 @@ fn unzip_flat<R: Read + Seek>(
         let Some(base) = Path::new(entry.name()).file_name() else {
             continue; // names like "" or "/": nothing to name, nothing to write
         };
+        // Decided BEFORE the mutable borrow of `entry` below: `base` borrows
+        // `entry.name()`, and consulting it after `io::copy(&mut entry, ...)`
+        // is an E0502 the unix build sees and a Windows build does not (the
+        // lane's `#[cfg(unix)]` block is what extends the borrow's liveness —
+        // found by ubuntu CI on first compile of the lane).
+        let program_member = base == std::path::Path::new(MEMBER_NAME);
         let mut out = fs::File::create(part_dir.join(base))?;
         io::copy(&mut entry, &mut out).map_err(zip::result::ZipError::Io)?;
+        // D28: the macOS arm64 zip's program member must come out
+        // executable — the exec bit is decided by the lane (exactly the
+        // `netcoredbg` member, deterministically 0o755), never by the
+        // archive's stored mode, which an author controls. Siblings stay
+        // non-executable; the Windows exe needs no bit anywhere.
+        #[cfg(unix)]
+        if program_member {
+            use std::os::unix::fs::PermissionsExt;
+            out.set_permissions(fs::Permissions::from_mode(0o755))
+                .map_err(zip::result::ZipError::Io)?;
+        }
         // The OS refuses a basename it cannot name a file with (`evil:x`
         // on Windows): that refusal surfaces as the named failure — the
         // containment never depended on the name being *sane*, only on it
@@ -509,6 +540,60 @@ mod tests {
         // going away (cache prune), like the gzip lane.
         fs::remove_file(&archive).unwrap();
         assert_eq!(materialize(&dir.join("netcoredbg-3.2.0-1092-win-x64.zip")).unwrap(), program);
+    }
+
+    #[test]
+    fn a_macos_arm64_zip_materializes_the_unix_binary_executable() {
+        // D28: the published macOS asset is upstream's osx-arm64.zip — the
+        // program is a Mach-O binary named `netcoredbg` (no `.exe`), and a
+        // non-executable extraction would die at exec with a bare
+        // permission error on the Mac. The exec bit is the lane's decision
+        // (see unzip_flat), asserted where the OS grades it.
+        let dir = temp_dir("zipmac");
+        let macho = b"\xCF\xFA\xED\xFE fake netcoredbg Mach-O".to_vec();
+        let archive = dir.join("netcoredbg-3.2.0-1092-macos-arm64.zip");
+        fs::write(
+            &archive,
+            zip_bytes(&[
+                ("netcoredbg/ThirdPartyNotices.txt", b"notices".as_slice()),
+                ("netcoredbg/netcoredbg", &macho),
+            ]),
+        )
+        .unwrap();
+
+        let program = materialize(&archive).expect("the macOS arm64 zip materializes");
+
+        // The unix program name under the same quarantine layout — NOT
+        // `extraction_target`, which names `netcoredbg.exe` on a Windows
+        // build host grading this lane.
+        assert_eq!(
+            program,
+            dir.join(ASSET_DIR).join("netcoredbg-3.2.0-1092-macos-arm64").join("netcoredbg"),
+        );
+        assert_eq!(fs::read(&program).unwrap(), macho);
+        assert!(program.parent().unwrap().join("ThirdPartyNotices.txt").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&program).unwrap().permissions().mode();
+            assert_ne!(mode & 0o111, 0, "the unix program must be executable: {mode:o}");
+            let sibling = program.parent().unwrap().join("ThirdPartyNotices.txt");
+            assert_eq!(fs::metadata(&sibling).unwrap().permissions().mode() & 0o111, 0,
+                "only the program member gets the exec bit");
+        }
+        assert!(archive.is_file(), "the cache entry keeps its verified bytes");
+
+        // Steady state on a unix host is the gzip lane's target stat (the
+        // mac lane publishes the same unix name): a second call lands on
+        // the same file without re-reading the archive. Only unix hosts
+        // (and only Macs in production) ever publish this name — a Windows
+        // build host's target stats look for `netcoredbg.exe`, so the
+        // idempotence step is graded where the lane actually runs.
+        #[cfg(unix)]
+        {
+            fs::remove_file(&archive).unwrap();
+            assert_eq!(materialize(&archive).unwrap(), program);
+        }
     }
 
     #[test]

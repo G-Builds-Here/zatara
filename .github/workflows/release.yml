@@ -25,9 +25,13 @@ env:
   # E1 verify task DONE (2026-10-13, before the first rc tag): the assumed tag
   # `3.2.0` is not a real release -- the latest is `3.2.0-1092`. Real assets of
   # that release: netcoredbg-linux-amd64.tar.gz, netcoredbg-linux-arm64.tar.gz,
-  # netcoredbg-osx-arm64.zip, netcoredbg-win64.zip. There is NO macOS x64
-  # build upstream at all -- consistent with the extension never downloading
-  # netcoredbg on macOS (macOS names no path; the proxy probes PATH/Homebrew).
+  # netcoredbg-osx-arm64.zip, netcoredbg-win64.zip. D28 (2026-10-14): the
+  # osx-arm64 asset is served through this manifest like the others -- the
+  # extension resolves and names it on Apple Silicon. There is NO macOS x64
+  # build upstream at all (verified 2026-10-14; and there is no Homebrew
+  # formula either -- formulae.brew.sh 404s both the formula and the cask),
+  # so the extension names no path on Intel Macs and the proxy probes
+  # PATH/Homebrew prefixes there (README, Requirements).
   NETCOREDBG_REPO: Samsung/netcoredbg
   NETCOREDBG_VERSION: "3.2.0-1092"
 
@@ -59,11 +63,12 @@ jobs:
             runner: ubuntu-24.04-arm
             binary: zatara-proxy
             netcoredbg_pattern: "netcoredbg-linux-arm64.tar.gz"
-          # macOS legs stage NO netcoredbg: upstream publishes no macOS x64
-          # build at all (only osx-arm64), and the extension never downloads
-          # netcoredbg on macOS -- it names no path there and the proxy probes
-          # PATH/Homebrew (README, Requirements). An empty pattern skips the
-          # fetch step below.
+          # D28: the arm64 leg stages upstream's official osx-arm64 build,
+          # staged+hashed by the same manifest machinery as win/linux. The
+          # x64 leg stages NOTHING: upstream publishes no macOS Intel build
+          # at all, so the extension names no path there and the proxy
+          # probes PATH/Homebrew prefixes (README, Requirements). An empty
+          # pattern skips the fetch step below.
           - target: macos-x64
             runner: macos-15-intel
             binary: zatara-proxy
@@ -71,7 +76,7 @@ jobs:
           - target: macos-arm64
             runner: macos-15
             binary: zatara-proxy
-            netcoredbg_pattern: ""
+            netcoredbg_pattern: "netcoredbg-osx-arm64.zip"
     steps:
       - uses: actions/checkout@v4
 
