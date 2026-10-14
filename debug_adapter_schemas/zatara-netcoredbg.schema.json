@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "zatara-netcoredbg debug scenario",
+  "description": "The documented key set for zatara debug.json scenarios. The config object is the one launch config that crosses the extension/proxy boundary (zatara-types::LaunchConfig, SCHEMA_EQ) - keys beyond these are rejected, not ignored (survey Recommendation 3: tightened adapter schema).",
+  "type": "object",
+  "required": ["label", "adapter", "config"],
+  "additionalProperties": false,
+  "properties": {
+    "label": {
+      "type": "string",
+      "description": "Name shown in Zed's debug UI."
+    },
+    "adapter": {
+      "const": "zatara-netcoredbg",
+      "description": "The zatara proxy adapter (extension id)."
+    },
+    "config": {
+      "type": "object",
+      "required": ["projectPath", "fullyQualifiedName", "cwd"],
+      "additionalProperties": false,
+      "properties": {
+        "projectPath": {
+          "type": "string",
+          "description": "Absolute path to the .csproj the test lives in."
+        },
+        "fullyQualifiedName": {
+          "type": "string",
+          "description": "Exact test FQN (a [Theory] case display name is valid); never a substring filter."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory the proxy runs build and test in."
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment the proxy forwards to build and test.",
+          "additionalProperties": { "type": "string" }
+        },
+        "resultsLog": {
+          "type": "boolean",
+          "description": "Optional, default false. True appends dotnet's own --logger trx to the test step, so each run writes a .trx results file under TestResults/ in the working directory. Absent means off."
+        }
+      }
+    }
+  }
+}

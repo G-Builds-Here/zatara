@@ -1,0 +1,19 @@
+id = "zatara-netcoredbg"
+name = "Zatara .NET"
+description = "Run and debug .NET tests from the Zed gutter via a netcoredbg DAP proxy."
+version = "0.1.0"
+schema_version = 1
+authors = ["G-Builds-Here"]
+repository = "https://github.com/G-Builds-Here/zatara"
+
+# The DAP server Zed spawns via get_dap_binary. The table name is the adapter
+# name users type in settings (languages."C#".debuggers) and that the locator
+# scenario carries; the schema is the four-field launch-config contract (Zed
+# requires a schema and defaults to <adapter-id>.json, which is not our
+# shipped file name, so the path is given explicitly).
+[debug_adapters.zatara-netcoredbg]
+schema_path = "debug_adapter_schemas/zatara-netcoredbg.schema.json"
+
+# The gutter-task locator (locator::LOCATOR_NAME). dap_locator_create_scenario
+# answers for tasks carrying the exact-FQN filter env.
+[debug_locators.zatara]

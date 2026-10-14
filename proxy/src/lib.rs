@@ -1,0 +1,39 @@
+//! zatara-proxy — the stdio DAP proxy Zed spawns as its debug adapter.
+//!
+//! The proxy answers the client on its own piped stdio and relays every DAP
+//! message to a netcoredbg child run in interpreter mode (blueprint DR-1).
+//! The message envelope (`seq` routing, Content-Length framing) is defined
+//! here; the payload contracts are imported from zatara-types and never
+//! redefined — the dependency direction stays extension -> types <- proxy.
+//!
+//! Seams frozen for the build-orchestration and output-pumping stories
+//! (LOC-0109 / LOC-0111): `session::RelaySink` (child-message and
+//! child-exit stream hooks) and `session::Session` (handshake phase).
+
+pub mod asset;
+pub mod framing;
+// The shipped diagnostics gates (LOC-0117): both env-armed, default-off,
+// and confined to the extension work dir. Internal — the gates are read at
+// startup here, never driven per-message.
+pub(crate) mod logging;
+// The macOS branch of netcoredbg resolution (LOC-0116): probe PATH and
+// Homebrew where the release matrix cannot ship an asset.
+pub mod macos_netcoredbg;
+// pub (not pub(crate)): the real-SDK breadth-count tests drive `build_filter`
+// directly — the filter the runner puts on argv is the filter under test.
+pub mod runner;
+pub mod relay;
+pub mod session;
+
+use std::process::ExitCode;
+
+/// Entry for `main`: spawn the adapter, relay until the client hangs up.
+pub fn run() -> ExitCode {
+    match relay::serve(relay::AdapterSpec::from_env(), Box::new(session::NullSink)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("zatara-proxy: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
