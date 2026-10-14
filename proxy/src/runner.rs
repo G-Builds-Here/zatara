@@ -18,6 +18,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, PtySize};
@@ -50,18 +51,33 @@ const PTY_COLS: u16 = 220;
 /// straddle machinery must still handle any split (`read` may return less).
 const PTY_READ_CHUNK_BYTES: usize = 8192;
 
-/// How long a failure path waits for a pty relay to reach EOF before
-/// answering anyway. A dead child's stream ends in milliseconds; the
-/// budget only ever bounds a survivor holding the pty open.
+/// The outer bound on any pump drain (D11 rework): a stream still
+/// producing bytes is the user's own output and gets streamed, however
+/// long it takes, but never past this cap. The drain's normal exit is the
+/// quiet window below, not this budget — the full wait only ever covers a
+/// child tree that dies mid-sentence at full output speed.
 const PUMP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The settle waiter's cap on the same pump-finish signal, deliberately
-/// two orders of magnitude shorter: by the time it runs the child is
-/// already gone, so an unfinished pump is one idling on a survivor-held
-/// pty with its output long since delivered — waiting it out would tax
-/// every clean session by the full drain budget (the CI latency job's
-/// 5.07 s constant, 2026-10-13). The grace bounds delivery latency of
-/// the already-buffered tail instead.
+/// How long the pty stream must sit byte-silent before a drain walks away
+/// from a pump blocked on a survivor-held pty (D11). A blocking pty read
+/// only sees EOF when the last write handle closes, and a daemon that
+/// inherited it (MSBuild's compiler server is the known holder) keeps the
+/// stream open long after the child is gone. Every drain runs after its
+/// child exited, so a byte-silent window means the already-buffered tail
+/// was delivered — the survivor owes the session nothing more.
+const PUMP_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often a quiet-window drain samples the activity counter and the
+/// pump-finished signal. One slice is the pump's worst-case detection lag;
+/// 25 ms is invisible next to the 250 ms window it rides inside.
+const PUMP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The settle waiter's cap on the same quiet-window drain, deliberately an
+/// order of magnitude shorter: by the time it runs the child is already
+/// gone and the green session owes the client only the already-buffered
+/// tail, so the grace caps total settle time while the quiet window lets a
+/// clean session leave early (the CI latency job once measured 5.07 s of
+/// pure wait per session, 2026-10-13).
 const TEST_SETTLE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// On by default (D18 flip, owner ruling 2026-10-14): the runner is the
@@ -226,22 +242,64 @@ fn work_dir(config: &LaunchConfig) -> String {
 struct Step {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// Completes when the relay thread has finished streaming this child's
-    /// pty output and released the pty master. Failure paths wait on it so
-    /// the child's final lines reach the client before the session-end
-    /// events `fail_launch` triggers — bounded, because a survivor process
-    /// holding the pty open (MSBuild's compiler server is the known one)
-    /// must never wedge the pipeline past its deadline.
+    /// pty output and released the pty master. Failure paths wait on it (via
+    /// the quiet-window drain below) so the child's final lines reach the
+    /// client before the session-end events `fail_launch` triggers.
     pump_done: Option<std::sync::mpsc::Receiver<()>>,
+    /// Counts pty reads that delivered bytes — the quiet-window drain's
+    /// activity signal (see `drain_until_quiet`).
+    output_ticks: Arc<AtomicU64>,
 }
 
 impl Step {
-    /// Wait (bounded) for the output pump to finish. Requires the stream to
-    /// be at its end already — the child exited, or its tree was just
-    /// killed — so the pty reader is at EOF and a normal pump lands well
-    /// inside the budget.
+    /// Wait for the output pump to have delivered everything it can.
+    /// Requires the stream's producer to be gone — the child exited, or its
+    /// tree was just killed — and returns on the pump's done-signal, on a
+    /// byte-silent pty, or at the drain cap.
     fn drain_pump(&mut self) {
         if let Some(done) = self.pump_done.take() {
-            let _ = done.recv_timeout(PUMP_DRAIN_TIMEOUT);
+            drain_until_quiet(
+                &done,
+                &self.output_ticks,
+                PUMP_QUIET_WINDOW,
+                PUMP_DRAIN_TIMEOUT,
+            );
+        }
+    }
+}
+
+/// Wait out the output pump the way a drained session can actually observe
+/// it: the pump's own done-signal, or a pty that has sat byte-silent for
+/// `quiet`. The old shape (D11) blocked on the done-signal for the whole
+/// cap — but that signal rides a blocking pty read whose EOF needs every
+/// write handle closed, so one inherited handle in a daemon (MSBuild's
+/// compiler server is the known holder) made every failure path pay the
+/// full budget. With the child already gone, silence for a window means the
+/// buffered tail has arrived; `cap` still bounds a stream genuinely still
+/// producing bytes.
+fn drain_until_quiet(
+    done: &std::sync::mpsc::Receiver<()>,
+    ticks: &AtomicU64,
+    quiet: std::time::Duration,
+    cap: std::time::Duration,
+) {
+    let start = std::time::Instant::now();
+    let mut last_ticks = ticks.load(Ordering::Relaxed);
+    let mut quiet_since = start;
+    loop {
+        match done.recv_timeout(PUMP_POLL_INTERVAL) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if start.elapsed() >= cap {
+            return;
+        }
+        let now_ticks = ticks.load(Ordering::Relaxed);
+        if now_ticks != last_ticks {
+            last_ticks = now_ticks;
+            quiet_since = std::time::Instant::now();
+        } else if quiet_since.elapsed() >= quiet {
+            return;
         }
     }
 }
@@ -318,13 +376,19 @@ fn spawn_step(
     let answerer = pair.master.take_writer().ok();
     let stream_tunnel = Arc::clone(tunnel);
     let (pump_done_tx, pump_done_rx) = std::sync::mpsc::channel();
+    let output_ticks = Arc::new(AtomicU64::new(0));
+    let pump_ticks = Arc::clone(&output_ticks);
     std::thread::spawn(move || {
-        stream_pty_output(&stream_tunnel, reader, answerer, pids, category);
+        stream_pty_output(&stream_tunnel, reader, answerer, pids, category, pump_ticks);
         drop(pair.master);
         let _ = pump_done_tx.send(());
     });
     drop(pair.slave); // nothing writes the slave side; let the reader see EOF
-    Ok(Step { child, pump_done: Some(pump_done_rx) })
+    Ok(Step {
+        child,
+        pump_done: Some(pump_done_rx),
+        output_ticks,
+    })
 }
 
 /// A pty with no terminal agent on the master end is a trap: console
@@ -500,6 +564,7 @@ fn stream_pty_output(
     mut writer: Option<Box<dyn Write + Send>>,
     pids: Option<std::sync::mpsc::Sender<u64>>,
     category: &'static str,
+    ticks: Arc<AtomicU64>,
 ) {
     let Some(mut reader) = reader.take() else { return };
     let mut answerer = TerminalAnswerer::default();
@@ -510,6 +575,10 @@ fn stream_pty_output(
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
+                // Activity first, delivery after: a drain watching this
+                // counter must see the byte that is about to be batched,
+                // never a window that closed over an in-flight read.
+                ticks.fetch_add(1, Ordering::Relaxed);
                 if let Some(w) = writer.as_mut() {
                     answerer.on_chunk(&chunk[..n], w.as_mut());
                 }
@@ -1299,15 +1368,19 @@ fn run(tunnel: Arc<Tunnel>, runner: RunnerConfig, mut config: LaunchConfig, laun
                 // The child is gone, so whatever still comes is the pty's
                 // already-buffered tail, and the pump delivers every read
                 // the moment it arrives — the wait lands in milliseconds.
-                // The grace is a CAP, deliberately far shorter than the
-                // failure paths' full `drain_pump` budget: a survivor
-                // (the scripted marker's watchdog, MSBuild's server) can
-                // hold the pty open for that whole budget with the stream
-                // long since flushed, and the CI latency job measured that
-                // cap — 5.07 s of pure wait per session — landing inside
-                // the session-end window this gate guards.
+                // The same quiet-window drain the failure paths use, under
+                // a deliberately shorter cap: a survivor holding the pty
+                // (the scripted marker's watchdog, MSBuild's server) must
+                // not tax a clean session past the session-end window this
+                // gate guards — the drain leaves on the quiet window, well
+                // inside the grace, never at it.
                 if let Some(done) = test.pump_done.take() {
-                    let _ = done.recv_timeout(TEST_SETTLE_GRACE);
+                    drain_until_quiet(
+                        &done,
+                        &test.output_ticks,
+                        PUMP_QUIET_WINDOW,
+                        TEST_SETTLE_GRACE,
+                    );
                 }
                 let _ = settle_tx.send(());
             });
@@ -1364,6 +1437,95 @@ mod tests {
         assert!(runner_armed(Some("yes")), "a typo'd arm value arms rather than silently off-ing");
         assert!(!runner_armed(Some("0")), "the one documented opt-out still opts out");
         assert!(runner_armed(Some("0 ")), "only the exact `0` opts out — a trailing space is a typo, not an opt-out");
+    }
+
+    /// Rule 3 on D11 (owner go 2026-10-14): the drain used to block on the
+    /// pump-done signal, which rides a blocking pty read whose EOF needs
+    /// every write handle closed — one inherited handle in a daemon
+    /// (MSBuild's compiler server is the known holder) made every failure
+    /// path pay the full 5 s cap. The drain must leave inside the quiet
+    /// window with the done-signal never arriving. Red on
+    /// `recv_timeout(PUMP_DRAIN_TIMEOUT)`, green on the quiet-window drain.
+    #[test]
+    fn a_silent_pump_blocked_on_a_survivor_is_walked_away_from_early() {
+        let (_done_tx, done_rx) = std::sync::mpsc::channel();
+        let ticks = AtomicU64::new(0);
+        let start = std::time::Instant::now();
+        drain_until_quiet(&done_rx, &ticks, PUMP_QUIET_WINDOW, PUMP_DRAIN_TIMEOUT);
+        let waited = start.elapsed();
+        assert!(
+            waited >= PUMP_QUIET_WINDOW,
+            "a silent stream cannot be declared quiet before its window elapses: {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "the drain rode toward the old 5 s cap instead of leaving on the quiet window: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_pump_ends_the_drain_without_waiting_the_window() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        done_tx.send(()).unwrap();
+        let ticks = AtomicU64::new(0);
+        let start = std::time::Instant::now();
+        drain_until_quiet(&done_rx, &ticks, PUMP_QUIET_WINDOW, PUMP_DRAIN_TIMEOUT);
+        let waited = start.elapsed();
+        assert!(
+            waited < PUMP_QUIET_WINDOW,
+            "a delivered stream must leave on its done-signal, not ride the window: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_still_producing_bytes_is_streamed_to_its_cap_not_the_window() {
+        let (_done_tx, done_rx) = std::sync::mpsc::channel();
+        let ticks = Arc::new(AtomicU64::new(0));
+        let chatter = Arc::clone(&ticks);
+        std::thread::spawn(move || {
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                chatter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let cap = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+        drain_until_quiet(&done_rx, &ticks, PUMP_QUIET_WINDOW, cap);
+        let waited = start.elapsed();
+        assert!(
+            waited >= cap,
+            "bytes still arriving are the session's own output: the drain must ride to the cap, got {waited:?}"
+        );
+        assert!(
+            waited < cap + std::time::Duration::from_millis(150),
+            "the drain overran its cap: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_goes_quiet_mid_drain_ends_the_drain_early() {
+        let (_done_tx, done_rx) = std::sync::mpsc::channel();
+        let ticks = Arc::new(AtomicU64::new(0));
+        let chatter = Arc::clone(&ticks);
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                chatter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let start = std::time::Instant::now();
+        drain_until_quiet(
+            &done_rx,
+            &ticks,
+            PUMP_QUIET_WINDOW,
+            std::time::Duration::from_secs(5),
+        );
+        let waited = start.elapsed();
+        assert!(
+            waited > std::time::Duration::from_millis(350)
+                && waited < std::time::Duration::from_millis(1200),
+            "last byte ~200 ms in plus the quiet window should land near 450 ms, never near the 5 s cap: {waited:?}"
+        );
     }
 
     #[test]

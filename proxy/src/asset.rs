@@ -282,7 +282,10 @@ fn unzip_flat<R: Read + Seek>(
         // `entry.name()`, and consulting it after `io::copy(&mut entry, ...)`
         // is an E0502 the unix build sees and a Windows build does not (the
         // lane's `#[cfg(unix)]` block is what extends the borrow's liveness —
-        // found by ubuntu CI on first compile of the lane).
+        // found by ubuntu CI on first compile of the lane). The binding is
+        // itself cfg-gated: the Windows build has no exec bit to decide and
+        // rightly calls the leftover unused.
+        #[cfg(unix)]
         let program_member = base == std::path::Path::new(MEMBER_NAME);
         let mut out = fs::File::create(part_dir.join(base))?;
         io::copy(&mut entry, &mut out).map_err(zip::result::ZipError::Io)?;
