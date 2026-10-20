@@ -381,8 +381,9 @@ pid. The status is truth, not polish: this is a Should-rated lane, and its
 behavior is probe-gated — on the pinned netcoredbg build (3.2.0-1092) the
 LOC-0134 spike measured that breakpoints do **not** bind in attach sessions.
 Interrupt, inspect, and resume work; do not plan a breakpoint-driven attach
-session on this build. A stop carrying `terminateDebuggee: true` kills the
-attached-to process; the Zed stop shape (without the flag) releases it. The
+session on this build. A session stop kills the attached-to process either
+way: `terminateDebuggee: true` kills it, and so does the DAP `terminate`
+that Zed's stop button sends (live-verified 2026-10-20). The
 attach truth is recorded on Windows — no mac CI. The rendezvous steps are in
 [manual-attach.md](docs/templates/manual-attach.md).
 
@@ -438,22 +439,21 @@ element, in `%APPDATA%\Zed\debug.json` on Windows:
 }
 ```
 
-The live-UI half of this recipe was marked owed by the probe. Each marker is
-the deferred done-condition — the probe's own step, quoted, not an invented
-click path:
+The live-UI half of this recipe was marked owed by the probe, then walked on
+live Zed 1.24.2 (Windows) with extension v0.1.3 on 2026-10-20 — the probe's
+own steps, not invented click paths:
 
-- not yet confirmed: install the probe's user-level fixtures, open its
-  repo-alpha, and confirm the picker lists the user profile and BOTH copies of
-  the collision twin, with the project copy rendered above the user copy
-- not yet confirmed: with the same user files installed, open repo-beta in a
-  second window and confirm its picker shows the user profile and its own
-  profile but not the other repo's project profile — project entries do not
-  cross repos, user entries do
-- not yet confirmed: in both windows open the task modal and confirm the user
-  global task lists in both repos while each repo's own task lists only at home
-- not yet confirmed: with a window left open, delete `%APPDATA%\Zed\debug.json`
-  and confirm the user-level profiles disappear from the debug picker without
-  restarting Zed
+- confirmed live 2026-10-20: the picker lists the user profile and BOTH copies
+  of the collision twin, with the project copy rendered above the user copy —
+  the picker groups by source file: project block first, then user block
+- confirmed live 2026-10-20: a second window on another repo shows the user
+  profiles plus its own project profiles only — project entries do not cross
+  repos, user entries do
+- confirmed live 2026-10-20: the user global task lists in both repos while
+  each repo's own task lists only at home
+- measured 2026-10-20: the debug picker does NOT hot-reload a deleted or
+  edited `%APPDATA%\Zed\debug.json` — a running Zed keeps the old list, so
+  restart it after editing user-level files
 
 The recipe's win-only parts — the AppData path and the probed picker — carry
 the same limitation stated everywhere in this section: recorded on Windows, no
