@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use serde_json::{json, Value};
-use zatara_types::{LaunchConfig, NETCOREDBG_ARG, RELEASE_WARNING_ENV, WORK_DIR_ENV};
+use zatara_types::{
+    launch_mode_from_env, LaunchConfig, LaunchMode, NETCOREDBG_ARG, RELEASE_WARNING_ENV,
+    WORK_DIR_ENV,
+};
 
 use crate::framing::{read_frame, write_frame};
 use crate::logging::{self, ProxyLog};
@@ -175,6 +178,18 @@ impl AdapterSpec {
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        // The program arm's POSIX half of the inherited kill-tree stack
+        // (LOC-0126): `TreeRegistry::kill_all` reaches a tree with the
+        // negative-pid group kill, which lands only when the tree's root
+        // leads its group — portable-pty setsid's the runner's steps, the
+        // plain `Command` spawn here must say so explicitly. Windows
+        // needs nothing of the kind: the job object and the toolhelp walk
+        // both address the tree without groups.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
         }
         cmd.spawn()
     }
@@ -350,6 +365,22 @@ pub(crate) struct Tunnel {
     child: Arc<Mutex<Child>>,
     sink: Mutex<Box<dyn RelaySink>>,
     pending: Mutex<HashMap<i64, InFlight>>,
+    /// The client's unanswered `initialize` seq. The proxy defers its own
+    /// answer until the child's arrives (pump_child converts it), so the
+    /// answer can carry the child's real capabilities; a child that dies
+    /// first is answered from here by [`end_session`] instead of hanging
+    /// the client on an initialize that never returns.
+    init_wait: Mutex<Option<i64>>,
+    /// Set AFTER the initialize answer reaches the client's pipe — the
+    /// ordering truth behind `wait_for_initialize_answered`.
+    init_answered: AtomicBool,
+    /// One explanation per step-refusal episode (live finding 2026-10-16:
+    /// netcoredbg refuses `next`/`step*` with E_FAIL when an on-demand
+    /// pause left it on an unsteppable frame, and clients that drop the
+    /// failure text leave the user with a button that silently does
+    /// nothing). Set once the relay has announced; reset when a step or
+    /// continue works again.
+    step_announced: AtomicBool,
     /// Set the instant the proxy's attach answer is relayed — the adapter
     /// has been told to resume (the synthesized `configurationDone` on the
     /// same write) and a late client `configurationDone` must not reach it
@@ -378,6 +409,23 @@ pub(crate) struct Tunnel {
     /// path this process owns. Empty while the runner is unarmed — the plain
     /// relay's teardown stays exactly the adapter kill it always was.
     pub(crate) tree: crate::runner::TreeRegistry,
+    /// Set once a project-mode launch takes this relay's adapter: the
+    /// session owns a debuggee, so its ending speaks program truth — a
+    /// nonzero `exited` arrives with an error-level announcement naming
+    /// the code (blueprint §6 "programrunner -> relay (exit)"). The test
+    /// lane never sets it (only `program::start` does), which is what
+    /// keeps LOC-0109's bytes untouched by this law.
+    program_session: AtomicBool,
+    /// The adapter's own tree, adopted at a program launch (LOC-0126):
+    /// Windows pins it into a kill-on-close job so the debuggee netcoredbg
+    /// spawns under it falls with every session-end path the proxy owns —
+    /// POSIX reaches it with the registry's negative-pid group kill (the
+    /// adapter leads its own group since [`AdapterSpec::spawn`]). Kept
+    /// apart from the runner's `tree` deliberately: the disconnect path
+    /// kills the runner's trees BEFORE forwarding the disconnect (the
+    /// live-defect ordering), while the adapter is the one tree the
+    /// forward itself needs alive to answer the request.
+    adapter_tree: crate::runner::TreeRegistry,
     /// AC2's single sink, already gated before this process started: `None`
     /// (the default) writes nothing anywhere. Lifecycle lines only — the log
     /// content is the story's declared non-goal, the one-file rule is the
@@ -417,6 +465,29 @@ impl Tunnel {
         let _ = self.child.lock().expect("child lock poisoned").kill();
     }
 
+    /// Enter the program law (LOC-0126): this session's launch belongs to
+    /// the programrunner arm, so its ending carries program truth. The
+    /// adapter is adopted as this session's tree the same instant —
+    /// before the launch reaches the adapter — so the debuggee netcoredbg
+    /// spawns is born inside the containment, and every session-end path
+    /// (`disconnect`, hung-up stdin, the adapter's own death) takes the
+    /// whole tree with it, the same guarantee the runner's steps ride.
+    pub(crate) fn begin_program_session(&self) {
+        self.program_session.store(true, Ordering::SeqCst);
+        let pid = self.child.lock().expect("child lock poisoned").id();
+        self.adapter_tree.adopt(Some(pid));
+    }
+
+    /// Blueprint §6's exit body: a nonzero program exit announced at error
+    /// level (`stderr` — the DAP category clients render as failure)
+    /// naming the code, on the wire before the `exited` event carrying
+    /// it. Emitted only when [`Self::begin_program_session`] has run;
+    /// the body shape itself is pure ([`exit_error_event`]) so a unit
+    /// test pins it independently of any session.
+    fn announce_program_exit_error(&self, code: i64) {
+        self.send_to_client(exit_error_event(code));
+    }
+
     /// Install the settle gate's receiving end (see the field doc): the
     /// runner calls this the moment the attach landed, handing over the
     /// receiver its step-drainer signals on. Arming *before* any session-
@@ -440,12 +511,49 @@ impl Tunnel {
         }
     }
 
-    /// Send a proxy-authored `attach{processId}` to the adapter on the
-    /// runner's behalf: the client never spawned that debugger target, so
-    /// the adapter's attach response is routed back as the answer to the
-    /// client's original launch request (the launch seq is what the
-    /// in-flight entry carries, under the `launch` command name).
-    pub(crate) fn attach_process(&self, pid: u64, launch_seq: i64) -> io::Result<()> {
+    /// The initialize ordering law (live CI defect 2026-10-17): the client's
+    /// `initialize` answer is written by `pump_child` at the CHILD's pace —
+    /// the flattened capabilities come from the child's own reply — while
+    /// every later answer (program/runner refusals, config rejects, the
+    /// dead-pid reject) is proxy-authored. On a machine where the child is
+    /// slow, a proxy-authored response overtakes the init answer (observed
+    /// both OSes: `launch-refused` before `init-ok`). The pump reads no
+    /// further frame until this gate opens, so no later request can be
+    /// answered ahead of the init answer. The flag is set by the threads
+    /// AFTER they write the answer (not at `init_wait`'s take — that would
+    /// re-open the race by microseconds), and a child that dies first is
+    /// answered by `end_session`, which sets it too. The budget covers the
+    /// pathological alive-but-never-answering child; overrunning prefers a
+    /// late response over a hung pump.
+    fn wait_for_initialize_answered(&self) {
+        const INIT_ORDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + INIT_ORDER_BUDGET;
+        while !self.init_answered.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                eprintln!("zatara-proxy: initialize unanswered past the ordering budget - proceeding");
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Send a proxy-authored `attach{processId}` to the adapter — the one
+    /// rewrite lane every debugger attach rides (LOC-0130): the runner's
+    /// behalf (`client_command` `"launch"`, LOC-0109's byte-identical
+    /// shape — the client never spawned that debugger target, so the
+    /// adapter's attach answer is routed back as the answer to the
+    /// client's original launch request) and the manual `request=attach`
+    /// lane (`client_command` `"attach"` — the client named the target
+    /// itself, but the debugger's own key is still `processId`, never the
+    /// config's `process_id`). Either way the in-flight entry carries the
+    /// client's seq under the client's command name, and the pump pairs
+    /// the adapter's answer back to it.
+    pub(crate) fn attach_process(
+        &self,
+        pid: u64,
+        client_seq: i64,
+        client_command: &str,
+    ) -> io::Result<()> {
         let child_seq = self.next_child_seq();
         let outbound = json!({
             "seq": child_seq,
@@ -456,7 +564,10 @@ impl Tunnel {
         self.pending
             .lock()
             .expect("pending map lock poisoned")
-            .insert(child_seq, InFlight { client_seq: launch_seq, command: "launch".into() });
+            .insert(
+                child_seq,
+                InFlight { client_seq, command: client_command.to_string() },
+            );
         let body = outbound.to_string();
         let mut child_in = self.child_in.lock().expect("child stdin lock poisoned");
         write_frame(&mut *child_in, body.as_bytes())
@@ -464,7 +575,9 @@ impl Tunnel {
 
     /// Forward a client request to the child under the proxy's child-side
     /// seq, remembering how to correlate the response back.
-    fn forward_to_child(&self, request: &Value) -> io::Result<()> {
+    /// `pub(crate)`: the programrunner arm hands validated project-mode
+    /// launches to the adapter through this same tracked-forward (LOC-0124).
+    pub(crate) fn forward_to_child(&self, request: &Value) -> io::Result<()> {
         let client_seq = request.get("seq").and_then(Value::as_i64).unwrap_or(0);
         let command = request.get("command").and_then(Value::as_str).unwrap_or("").to_string();
         self.forward_to_child_tracked(request, Some((client_seq, command)))
@@ -515,6 +628,26 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
             // the pipe before that close (owner's lost `Passed!`, live
             // defect 2026-10-13). Envelope and body untouched either way.
             Some("event") => {
+                // The one body law on the event path (LOC-0126, blueprint
+                // §6): in a program session, a nonzero `exited` is
+                // announced at error level before it reaches the client —
+                // the failed session says why, not just that. The event
+                // itself still leaves untouched, envelope aside. A test
+                // session never carries the flag, so the byte-identity
+                // law's path does not branch here.
+                if message.get("event").and_then(Value::as_str) == Some("exited")
+                    && tunnel.program_session.load(Ordering::SeqCst)
+                {
+                    if let Some(code) = message
+                        .get("body")
+                        .and_then(|body| body.get("exitCode"))
+                        .and_then(Value::as_i64)
+                    {
+                        if code != 0 {
+                            tunnel.announce_program_exit_error(code);
+                        }
+                    }
+                }
                 if matches!(
                     message.get("event").and_then(Value::as_str),
                     Some("exited" | "terminated")
@@ -524,19 +657,66 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                 tunnel.send_to_client(message)
             }
             Some("response") => {
+                // The child's answer to the `initialize` the proxy forwarded
+                // is proxy-internal input: it becomes the proxy's own answer
+                // to the client, carrying the child's real capabilities
+                // FLATTENED into the body. The spec's nested
+                // `{ "capabilities": {...} }` shape reads as an all-None
+                // capability map to a client that parses the whole body
+                // (Zed does): such a client concludes
+                // `supportsConfigurationDoneRequest` is false, never sends
+                // `configurationDone`, and netcoredbg holds the debuggee
+                // suspended forever, silently (live defect 2026-10-16). The
+                // two flags the proxy guarantees unconditionally ride the
+                // answer whatever the child said; a failing child answer is
+                // relayed as the client's init failure, not swallowed.
+                if message.get("command").and_then(Value::as_str) == Some("initialize") {
+                    if let Some(seq) = tunnel.init_wait.lock().expect("init_wait lock poisoned").take() {
+                        if message.get("success").and_then(Value::as_bool) == Some(true) {
+                            let mut body = message
+                                .get("body")
+                                .and_then(|body| body.get("capabilities"))
+                                .cloned()
+                                .unwrap_or_else(|| json!({}));
+                            if let Some(map) = body.as_object_mut() {
+                                map.insert("supportsConfigurationDoneRequest".to_string(), json!(true));
+                                map.insert("supportsTerminateRequest".to_string(), json!(true));
+                            }
+                            tunnel.send_to_client(json!({
+                                "type": "response",
+                                "request_seq": seq,
+                                "command": "initialize",
+                                "success": true,
+                                "body": body,
+                            }));
+                        } else {
+                            let reason = message
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("adapter rejected initialize");
+                            tunnel.error_response(seq, "initialize", reason);
+                        }
+                        // The answer is on the pipe (either shape): open the
+                        // ordering gate AFTER the write, never at the take
+                        // (law at `wait_for_initialize_answered`).
+                        tunnel.init_answered.store(true, Ordering::SeqCst);
+                    }
+                    continue;
+                }
                 let child_seq = message.get("request_seq").and_then(Value::as_i64);
                 let correlated = child_seq
                     .and_then(|seq| tunnel.pending.lock().expect("pending map lock poisoned").remove(&seq));
                 // Only relay responses we can route back to a client request.
-                // The child's answer to `initialize` (which the proxy answers
-                // itself) is untracked, so it stays child-side and is dropped.
                 if let Some(in_flight) = correlated {
-                    // The proxy-authored attach is the one pairing where the
-                    // adapter's word ("attach") is not the client's word
-                    // ("launch"). Two spec repairs ride this moment, in this
-                    // order, live defects 2026-10-13:
+                    // The proxy-authored attach is the pairing this branch
+                    // serves: on the runner lane the adapter's word
+                    // ("attach") is not the client's word ("launch"); on
+                    // the manual pid-attach lane (LOC-0130) the words match
+                    // but the rule is the same — an answered attach means a
+                    // resumed session. Two spec repairs ride this moment,
+                    // in this order, live defects 2026-10-13:
                     // 1) resume the adapter BEFORE the answer leaves: a
-                    //    client that polls `threads` on the launch answer
+                    //    client that polls `threads` on the attach answer
                     //    (Zed does) gets 0x80004005 from a netcoredbg that
                     //    refuses `threads` until resumed, aborts its startup
                     //    chain, and never sends its own configurationDone —
@@ -546,7 +726,7 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                     //    a response that says "attach" to a "launch" request
                     //    is treated as unanswered, the configurationDone
                     //    never comes, and netcoredbg waits forever.
-                    let resumed_now = in_flight.command == "launch"
+                    let resumed_now = matches!(in_flight.command.as_str(), "launch" | "attach")
                         && message.get("command").and_then(Value::as_str) == Some("attach")
                         && message.get("success").and_then(Value::as_bool) == Some(true);
                     if resumed_now {
@@ -557,9 +737,37 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                             "arguments": {},
                         }));
                     }
+                    // §6's law for the step the client only shows as a
+                    // dead button (live finding 2026-10-16): the refusal
+                    // reaches the user as a failure AND as one visible
+                    // sentence naming the recovery — on the client pipe,
+                    // after the answer itself. One per episode (the eager
+                    // clicker must not drown the console); the next step
+                    // or continue that works re-arms it.
+                    let step_cmd = matches!(in_flight.command.as_str(), "next" | "stepIn" | "stepOut");
+                    let answered = message.get("success").and_then(Value::as_bool);
+                    let refusal_reason = if step_cmd && answered == Some(false) {
+                        Some(
+                            message
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("the adapter refused the step")
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    };
+                    let client_command = in_flight.command.clone();
                     message["request_seq"] = json!(in_flight.client_seq);
                     message["command"] = json!(in_flight.command);
                     tunnel.send_to_client(message);
+                    if let Some(reason) = refusal_reason {
+                        if !tunnel.step_announced.swap(true, Ordering::SeqCst) {
+                            tunnel.send_to_client(step_refusal_event(&client_command, &reason));
+                        }
+                    } else if (step_cmd || client_command == "continue") && answered == Some(true) {
+                        tunnel.step_announced.store(false, Ordering::SeqCst);
+                    }
                 }
             }
             _ => {}
@@ -577,6 +785,15 @@ fn end_session(tunnel: &Tunnel) -> ! {
     // runner tree still alive past here is an orphan the moment the
     // process is. Kill first, grieve second.
     tunnel.tree.kill_all();
+    // The program arm's adopted adapter tree rides the same first strike
+    // (LOC-0126): the adapter died with its debuggee still under it — the
+    // EOF this pump just read is the adapter's exit, not the tree's — and
+    // closing that tree here is what turns "session over" into "nothing
+    // left". The job's kernel-side answer needs no live thread; a debuggee
+    // that inherited the adapter's stdout and thereby blocked this very
+    // EOF is the shape `disconnect`'s synchronous close answers.
+    // Idempotent, and empty whenever no program ran.
+    tunnel.adapter_tree.kill_all();
     // ... but grieve before answering: the kill above woke the settle
     // waiter, and its drain puts the test step's final bytes — the run
     // summary among them — on the client pipe before this function's own
@@ -613,17 +830,68 @@ fn end_session(tunnel: &Tunnel) -> ! {
             "adapter exited before responding",
         );
     }
+    // The deferred `initialize` answer rides the same law: a child that
+    // died before answering gets its own error, not a silent pipe close.
+    if let Some(seq) = tunnel.init_wait.lock().expect("init_wait lock poisoned").take() {
+        tunnel.error_response(seq, "initialize", "adapter exited before responding");
+        // A died-first child still answers the init law: the gate opens.
+        tunnel.init_answered.store(true, Ordering::SeqCst);
+    }
 
+    let reported_exit_code = exit_code.unwrap_or(-1);
+    if tunnel.program_session.load(Ordering::SeqCst) && reported_exit_code != 0 {
+        // The same §6 body the pass-through path emits, on the path that
+        // authors the pair itself: an adapter dying under a program
+        // session is a failed session, and a failed session says so at
+        // error level before the console closes. A clean-terminating
+        // adapter under a program session stays silent — its code is 0.
+        tunnel.announce_program_exit_error(i64::from(reported_exit_code));
+    }
     tunnel.send_to_client(json!({
         "type": "event",
         "event": "exited",
-        "body": { "exitCode": exit_code.unwrap_or(-1) },
+        "body": { "exitCode": reported_exit_code },
     }));
     tunnel.send_to_client(json!({"type": "event", "event": "terminated"}));
 
     // Closing the process's stdout — which exiting does — is the teardown
     // signal: the client's read side sees EOF and closes the session UI.
     std::process::exit(0);
+}
+
+/// The one shape of a program exit's error announcement: an `output`
+/// event at error level (`category: "stderr"`) naming the exit code,
+/// line-terminated like every other output event. The body a program
+/// session's nonzero `exited` rides in front of (blueprint §6); the
+/// session's mode, not this event, decides whether it is ever sent.
+fn exit_error_event(code: i64) -> Value {
+    json!({
+        "type": "event",
+        "event": "output",
+        "body": {
+            "category": "stderr",
+            "output": format!("zatara: program exited with code {code}\n"),
+        },
+    })
+}
+
+/// The one shape of a step-refusal explanation: an `output` event at error
+/// level (`category: "stderr"`) the client renders where the user watches
+/// the button do nothing — the refusal named, the recovery named, the
+/// relay's innocence stated (`relayed untouched`). Same channel as
+/// [`exit_error_event`]'s announcement; a step refusal is a failed step,
+/// and a failed step says why.
+fn step_refusal_event(command: &str, reason: &str) -> Value {
+    json!({
+        "type": "event",
+        "event": "output",
+        "body": {
+            "category": "stderr",
+            "output": format!(
+                "zatara: the debugger refused '{command}' ({reason}). An on-demand pause can leave it on code it cannot step; press Continue and stop again on a breakpoint. The refusal came from the adapter, relayed untouched.\n"
+            ),
+        },
+    })
 }
 
 /// The one shape of a DAP error response in this file: a `success: false`
@@ -687,12 +955,17 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
         child: Arc::new(Mutex::new(child)),
         sink: Mutex::new(sink),
         pending: Mutex::new(HashMap::new()),
+        init_wait: Mutex::new(None),
+        init_answered: AtomicBool::new(false),
+        step_announced: AtomicBool::new(false),
         configuration_done: AtomicBool::new(false),
         test_settle: Mutex::new(None),
         out_seq: AtomicI64::new(0),
         child_seq: AtomicI64::new(0),
         runner: crate::runner::RunnerConfig::from_env(),
         tree: crate::runner::TreeRegistry::default(),
+        program_session: AtomicBool::new(false),
+        adapter_tree: crate::runner::TreeRegistry::default(),
         log: proxy_log,
     });
     thread::spawn({
@@ -722,27 +995,26 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
                 session.advance_on_client_message(&message);
                 match command.as_str() {
                     "initialize" => {
-                        // The proxy is the client's adapter: it answers for
-                        // its own capabilities. The answer goes out *before*
-                        // the request is forwarded, so the handshake order is
-                        // the proxy's guarantee and cannot be overtaken by a
-                        // fast child event reacting to being initialized. The
+                        // The proxy is the client's adapter, but the answer is
+                        // built from the CHILD's capabilities: a client that
+                        // parses the initialize body for its capability view
+                        // (Zed does — and the spec's nested shape reads as an
+                        // all-None map to its parser, live defect 2026-10-16)
+                        // must see what the adapter actually supports. The
+                        // client's seq waits in `init_wait`; pump_child turns
+                        // the child's own answer into the proxy's, and a child
+                        // that dies first is answered by `end_session`. The
                         // child is initialized too (DAP requires it before any
-                        // other request), but its answer is proxy-internal —
-                        // untracked, so the pump drops it.
-                        tunnel.send_to_client(json!({
-                            "type": "response",
-                            "request_seq": client_seq,
-                            "command": "initialize",
-                            "success": true,
-                            "body": { "capabilities": {
-                                "supportsConfigurationDoneRequest": true,
-                                "supportsTerminateRequest": true,
-                            } },
-                        }));
+                        // other request) — but the CHILD cannot overtake its
+                        // own answer while the PROXY could: every later,
+                        // proxy-authored response raced the child-paced init
+                        // answer (live CI defect 2026-10-17). The pump gate
+                        // below is the ordering law for that race.
+                        *tunnel.init_wait.lock().expect("init_wait lock poisoned") = Some(client_seq);
                         if tunnel.forward_to_child_untracked(&message).is_err() {
                             adapter_lost();
                         }
+                        tunnel.wait_for_initialize_answered();
                         // The degraded-session note (owner ruling
                         // 2026-10-13, sharpened same day): an unreachable
                         // release neither blocks nor takes Console billing —
@@ -760,36 +1032,141 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
                             // …but forward the raw body: re-serializing the
                             // parsed LaunchConfig would silently drop fields
                             // the proxy has never seen.
+                            Ok(config)
+                                if config.request
+                                    == Some(zatara_types::LaunchRequest::Attach) =>
+                            {
+                                // T3 defense in depth (clean-room,
+                                // 2026-10-17): an attach-shaped config
+                                // arriving on a LAUNCH command means the
+                                // extension named the wrong request kind
+                                // (an older wasm predating the fix).
+                                // Dispatching it would silently build and
+                                // test a lane the user never asked for —
+                                // the fail-loud path names the mismatch
+                                // instead, and nothing enters `Launched`.
+                                tunnel.error_response(
+                                    client_seq,
+                                    "launch",
+                                    "launch config rejected: an attach config must \
+                                     arrive as an attach request — this session's \
+                                     extension answered Launch for it; update or \
+                                     reinstall the zatara extension",
+                                );
+                            }
                             Ok(config) => {
                                 // The phase enters `Launched` only on this
                                 // verdict — a launch answered with a
                                 // validation error leaves it where it stands.
                                 session.accept_launch();
-                                match tunnel.runner {
-                                    // An armed runner owns the validated
-                                    // launch from here: build and test are
-                                    // orchestrated in-proxy and the debugger
-                                    // receives an `attach`, so the raw
-                                    // launch never reaches the adapter.
-                                    Some(runner) => {
-                                        crate::runner::start(
+                                // The mode resolves at this boundary (LOC-0124,
+                                // DR-1): the knob when it answers, LOC-0122's
+                                // inference otherwise. Project mode is the
+                                // programrunner arm's launch; the knob is read
+                                // once here and never becomes a wire field.
+                                match crate::program::dispatch_mode(&config, launch_mode_from_env()) {
+                                    // The program arm owns Project launches:
+                                    // existence gate, then the raw launch to
+                                    // the adapter — no build, no test step
+                                    // (DR-2), the relay's stack from here.
+                                    LaunchMode::Project => {
+                                        crate::program::start(
                                             Arc::clone(&tunnel),
-                                            runner,
-                                            config,
+                                            &config,
+                                            &message,
                                             client_seq,
                                         );
                                     }
-                                    None => {
-                                        if tunnel.forward_to_child(&message).is_err() {
-                                            adapter_lost();
+                                    // Test mode keeps the dispatch the story
+                                    // found (LOC-0109 law): an armed runner
+                                    // owns the validated launch from here —
+                                    // build and test are orchestrated in-proxy
+                                    // and the debugger receives an `attach`,
+                                    // so the raw launch never reaches the
+                                    // adapter — unarmed, the raw launch is
+                                    // forwarded as it always was.
+                                    LaunchMode::Test => match tunnel.runner {
+                                        Some(runner) => {
+                                            crate::runner::start(
+                                                Arc::clone(&tunnel),
+                                                runner,
+                                                config,
+                                                client_seq,
+                                            );
                                         }
-                                    }
+                                        None => {
+                                            if tunnel.forward_to_child(&message).is_err() {
+                                                adapter_lost();
+                                            }
+                                        }
+                                    },
                                 }
                             }
                             Err(e) => tunnel.error_response(
                                 client_seq,
                                 "launch",
                                 &format!("launch config rejected: {e}"),
+                            ),
+                        }
+                    }
+                    "attach" => {
+                        // The manual pid attach (LOC-0130): a hand-written
+                        // debug.json names `request=attach` + `process_id` —
+                        // the one shipped lane where the client names the
+                        // debugger target itself. It rides the same rewrite
+                        // the runner's attach answer rides: the proxy
+                        // authors `attach{processId}` (the debugger's own
+                        // key — the config's snake_case `process_id` is
+                        // zatara's schema, not netcoredbg's word), and the
+                        // pump pairs the answer back to this seq. The
+                        // scenario config never reaches the adapter.
+                        let arguments = message.get("arguments").cloned().unwrap_or(Value::Null);
+                        match serde_json::from_value::<LaunchConfig>(arguments) {
+                            Ok(config) => match config.process_id {
+                                // The wire contract rejects attach-without-
+                                // pid (zatara-types' TryFrom), so this arm
+                                // is the reject-don't-ignore backstop, not
+                                // an expected path.
+                                None => tunnel.error_response(
+                                    client_seq,
+                                    "attach",
+                                    "attach config rejected: missing field `process_id`",
+                                ),
+                                Some(pid) => {
+                                    // Same verdict semantics as the launch
+                                    // arm: the phase enters `Launched` on
+                                    // acceptance of the config, not on the
+                                    // adapter's answer.
+                                    session.accept_launch();
+                                    // The dead-pid answer is a clean DAP
+                                    // error that NAMES the pid (LOC-0134
+                                    // probe finding 3: netcoredbg's own
+                                    // 0x80070057 names nothing, and the
+                                    // verdict this story ships is the
+                                    // error a client can act on). The gate
+                                    // is pre-forward, so an attach to a
+                                    // dead pid never touches the adapter —
+                                    // no retry storm, no orphan debugger.
+                                    if !crate::runner::process_exists(pid) {
+                                        tunnel.error_response(
+                                            client_seq,
+                                            "attach",
+                                            &format!(
+                                                "attach to pid {pid} failed: no process {pid} is running"
+                                            ),
+                                        );
+                                    } else if tunnel
+                                        .attach_process(pid, client_seq, "attach")
+                                        .is_err()
+                                    {
+                                        adapter_lost();
+                                    }
+                                }
+                            },
+                            Err(e) => tunnel.error_response(
+                                client_seq,
+                                "attach",
+                                &format!("attach config rejected: {e}"),
                             ),
                         }
                     }
@@ -824,15 +1201,64 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
                         // it owns is allowed to outlive the request.
                         tunnel.tree.kill_all();
                         // Forward so the adapter can answer, then the proxy
-                        // owns teardown: it shuts the child down itself rather
-                        // than trusting the adapter to self-terminate, so a
-                        // wedged netcoredbg can never keep the proxy alive
-                        // past the client's disconnect. Killing the child
-                        // closes its stdout; the pump then runs the session-end
-                        // sequence and the proxy exits.
+                        // owns teardown. The adapter is given its grace to
+                        // deliver the answer it just received first: a real
+                        // netcoredbg answers disconnect and self-terminates
+                        // (LOC-0134 probe, pinned build — the fake models
+                        // the same), and killing the instant the forward
+                        // returns races exactly that answer away whenever the
+                        // child is still mid-frame — live defect surfaced by
+                        // LOC-0130's manual-attach lane, where the local
+                        // configurationDone answer puts the client's
+                        // disconnect on the pipe while the synthesized resume
+                        // is still being served: the child died mid-write
+                        // with the disconnect still unread. The grace is
+                        // bounded, so a wedged netcoredbg can never keep the
+                        // proxy alive past the client's disconnect; the kill
+                        // below stays the backstop. The answer itself rides
+                        // the pump — this arm never touches the response
+                        // path. Killing the child, or the child's own exit,
+                        // closes its stdout; the pump then runs the
+                        // session-end sequence and the proxy exits.
                         if tunnel.forward_to_child(&message).is_err() {
                             adapter_lost();
                         }
+                        // The program arm's tree falls with it (LOC-0126):
+                        // the client asked to stop, and the debuggee born
+                        // under this adapter must not outlive the request.
+                        // Unlike the runner's `tree` above, this close goes
+                        // AFTER the forward — the adapter is the one tree
+                        // the forward needs alive to answer the request.
+                        // It also waits out the same grace the child is
+                        // given below: on POSIX the tree kill is a group
+                        // kill that takes the adapter root with it, and
+                        // firing it the instant the forward returns SIGKILLs
+                        // the adapter past its clean exit — the recorded
+                        // disposition then reads as a signal death (code
+                        // -1), and a program session announces a failure it
+                        // never witnessed (live ubuntu defect 2026-10-17:
+                        // the whole program flow carried an
+                        // exit-announcement Windows never saw). No
+                        // deadlock hides behind the wait: the grace is
+                        // bounded, and the kill below still forces the
+                        // adapter's stdout shut when its answer never comes
+                        // or a debuggee holds the pipe.
+                        const DISCONNECT_GRACE: std::time::Duration =
+                            std::time::Duration::from_secs(2);
+                        let grace = std::time::Instant::now() + DISCONNECT_GRACE;
+                        loop {
+                            let gone = tunnel
+                                .child
+                                .lock()
+                                .expect("child lock poisoned")
+                                .try_wait()
+                                .is_ok_and(|status| status.is_some());
+                            if gone || std::time::Instant::now() >= grace {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        tunnel.adapter_tree.kill_all();
                         let _ = tunnel.child.lock().expect("child lock poisoned").kill();
                     }
                     _ => {
@@ -852,8 +1278,10 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
     }
     // The client hung up: never orphan the adapter (research findings §9),
     // and never orphan the runner's trees either — a hung-up stdin is a stop
-    // like any other, and the editor is not coming back for them.
+    // like any other, and the editor is not coming back for them. The
+    // program arm's adopted tree is one of "them" too (LOC-0126).
     tunnel.tree.kill_all();
+    tunnel.adapter_tree.kill_all();
     let mut child = tunnel.child.lock().expect("child lock poisoned");
     let _ = child.kill();
     let _ = child.wait();
@@ -861,7 +1289,25 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
 }
 
 /// The adapter pipe broke mid-session.
-fn adapter_lost() -> ! {
+pub(crate) fn adapter_lost() -> ! {
     eprintln!("zatara-proxy: adapter write failed — the adapter is gone");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod exit_law_tests {
+    use super::*;
+
+    #[test]
+    fn a_nonzero_exit_is_announced_at_error_level_naming_the_code() {
+        let event = exit_error_event(3);
+        assert_eq!(event["type"], "event");
+        assert_eq!(event["event"], "output");
+        // Error level in DAP output terms is the `stderr` category — the
+        // one the client renders as a failure, not the raw program stream.
+        assert_eq!(event["body"]["category"], "stderr");
+        let output = event["body"]["output"].as_str().expect("output text");
+        assert!(output.contains('3'), "the code must be named: {output}");
+        assert!(output.ends_with('\n'), "a DAP output chunk is line-terminated");
+    }
 }

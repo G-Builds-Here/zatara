@@ -29,12 +29,15 @@ impl Extension for Zatara {
         Self
     }
 
-    /// Phase one of the gutter debug flow: the task is turned into a debug
-    /// scenario whose `config` is the complete LOC-0106 launch config, so no
-    /// build task is needed (epic DR-2 — the proxy owns build and test). If
-    /// the locator-without-build-task spike fails on a Zed version, the
-    /// documented answer is `locator::echo_fallback_scenario` — same
-    /// scenario, plus a static no-op echo build step.
+    /// Phase one of the debug flow, two lanes: a gutter task (exact-FQN
+    /// filter env) is turned into a scenario whose `config` is the complete
+    /// LOC-0106 launch config, so no build task is needed (epic DR-2 — the
+    /// proxy owns build and test); the shipped program-build door
+    /// (`ZATARA_PROGRAM_BUILD=1`, LOC-0127) is turned into the program-mode
+    /// hint pair, resolved at launch (LOC-0129). Anything else is not
+    /// claimed. If the locator-without-build-task spike fails on a Zed
+    /// version, the documented answer is `locator::echo_fallback_scenario`
+    /// — same scenario, plus a static no-op echo build step.
     fn dap_locator_create_scenario(
         &mut self,
         _locator_name: String,
@@ -42,22 +45,34 @@ impl Extension for Zatara {
         resolved_label: String,
         debug_adapter_name: String,
     ) -> Option<DebugScenario> {
-        locator::native_scenario(&build_task, resolved_label, debug_adapter_name)
+        locator::native_scenario(&build_task, resolved_label.clone(), debug_adapter_name.clone())
+            .or_else(|| locator::program_scenario(&build_task, resolved_label, debug_adapter_name))
     }
 
     /// Zed probes this before starting a session whose scenario carries no
-    /// build task (every gutter Debug we emit — DR-2). An error here makes Zed
-    /// abort with "cannot determine how to run this debug scenario", so this
-    /// must answer, never decline. The answer is always Launch: this adapter's
-    /// config names a project and a test to run, and the proxy launches that
-    /// process itself (build, paused test, attach are the proxy's own steps).
-    /// No config we produce or accept can mean Attach.
+    /// build task (every Debug we emit — DR-2). An error here makes Zed
+    /// abort with "cannot determine how to run this debug scenario", so
+    /// this must answer, never decline (LOC-0128 AC3: Err aborts the whole
+    /// scenario — forbidden). The answer is read from the raw config, never
+    /// from a `LaunchConfig` parse (shapes the proxy will reject later — an
+    /// attach without a pid — still get their kind here, because declining
+    /// at this gate would abort what the proxy's fail-loud path is supposed
+    /// to name).
+    ///
+    /// This probe is a gate, not the wire: the DAP command Zed actually
+    /// sends is the kind carried in `get_dap_binary`'s request_args
+    /// (measured live at the T3 clean-room session, Zed
+    /// 1.24.2+stable.373 — the probe alone never routes an attach). The
+    /// two answers must therefore never disagree, and they cannot: both
+    /// read through `adapter::request_kind_of` — `request: "attach"`
+    /// answers Attach (manual-pid attach, LOC-0130's lane), everything
+    /// else answers Launch.
     fn dap_request_kind(
         &mut self,
         _adapter_name: String,
-        _config: serde_json::Value,
+        config: serde_json::Value,
     ) -> Result<StartDebuggingRequestArgumentsRequest, String> {
-        Ok(StartDebuggingRequestArgumentsRequest::Launch)
+        Ok(adapter::request_kind_of(&config))
     }
 
     /// What to spawn as the `csharp` debug adapter: the resolved zatara-proxy

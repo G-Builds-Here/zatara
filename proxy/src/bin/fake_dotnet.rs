@@ -295,7 +295,11 @@ fn arm_parent_death_watchdog(marker_pid: Option<u32>) {
             thread::sleep(Duration::from_millis(25));
             if unsafe { libc::getppid() } != expected_parent {
                 // Negative pid = the whole group, this process included.
-                unsafe { libc::kill(libc::getpgid(0), libc::SIGKILL) };
+                // The take MUST be negative: a positive pgid names only the
+                // process whose pid equals the group number - the group
+                // leader, never the tree (live CI defect 2026-10-17: the
+                // fixture tree outlived every parent-death on posix).
+                unsafe { libc::kill(-libc::getpgid(0), libc::SIGKILL) };
                 std::process::exit(1);
             }
         });

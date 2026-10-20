@@ -15,4 +15,7 @@ pub use dap::{
     Breakpoint, OutputEventBody, SetBreakpointsArguments, SetBreakpointsResponseBody, Source,
     SourceBreakpoint,
 };
-pub use launch_config::LaunchConfig;
+pub use launch_config::{
+    launch_mode_from_env, launch_mode_from_knob, LaunchConfig, LaunchMode, LaunchRequest,
+    ZATARA_LAUNCH_MODE,
+};

@@ -16,8 +16,8 @@
     },
     "config": {
       "type": "object",
-      "required": ["projectPath", "fullyQualifiedName", "cwd"],
       "additionalProperties": false,
+      "description": "The one launch config that crosses the extension/proxy boundary. One key set serves both lanes (SCHEMA_EQ: these properties equal zatara-types::LaunchConfig's serde fields): a config carrying a program or request key takes the program/attach lane, every other config is the test lane and must name its target.",
       "properties": {
         "projectPath": {
           "type": "string",
@@ -39,7 +39,53 @@
         "resultsLog": {
           "type": "boolean",
           "description": "Optional, default false. True appends dotnet's own --logger trx to the test step, so each run writes a .trx results file under TestResults/ in the working directory. Absent means off."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Gutter-click scope: method (default when absent), case, class, or file. Optional; the shipped gutter locator never emits it."
+        },
+        "framework": {
+          "type": "string",
+          "description": "Test framework behind the target (nunit, mstest, xunit), consulted only for case scope. Optional."
+        },
+        "caseArguments": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Displayed arguments of the invoked case, as displayed tokens. Optional."
+        },
+        "methodParameters": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The invoked method's parameter names, zipped with caseArguments to rebuild the named-argument display. Optional."
+        },
+        "program": {
+          "type": "string",
+          "description": "Program mode: the dll or apphost to debug. Its presence selects the program lane and releases the config from the test-lane keys."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments handed to the program."
+        },
+        "request": {
+          "enum": ["launch", "attach"],
+          "description": "What the config asks the proxy to do: launch a program or attach to a running pid. Absent means a test-lane config."
+        },
+        "process_id": {
+          "type": "integer",
+          "description": "Manual-pid attach target. Snake_case on the wire - a deliberate exception to the camelCase vocabulary, pinned verbatim by the contract's exact JSON shapes."
         }
+      },
+      "if": {
+        "anyOf": [
+          { "required": ["program"] },
+          { "required": ["request"] }
+        ]
+      },
+      "else": {
+        "type": "object",
+        "required": ["projectPath", "fullyQualifiedName"],
+        "description": "The test lane: a config with no program and no request key must name the exact test it debugs."
       }
     }
   }

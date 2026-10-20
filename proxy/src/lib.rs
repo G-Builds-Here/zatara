@@ -11,6 +11,11 @@
 //! child-exit stream hooks) and `session::Session` (handshake phase).
 
 pub mod asset;
+// Solution-first exe-project discovery (LOC-0125, DR-4): the filesystem
+// lives on this side of the wall, so resolution is called at launch time
+// (wired by LOC-0129), never by the locator (DR-3 — enforced structurally:
+// the extension crate does not depend on this one).
+pub mod discovery;
 pub mod framing;
 // The shipped diagnostics gates (LOC-0117): both env-armed, default-off,
 // and confined to the extension work dir. Internal — the gates are read at
@@ -20,6 +25,10 @@ pub(crate) mod logging;
 // prefixes for the Macs the release matrix cannot ship an asset for —
 // Intel (no upstream build exists) and degraded Apple-Silicon sessions.
 pub mod macos_netcoredbg;
+// The programrunner arm (LOC-0124, DR-5): project-mode launches ride the
+// relay raw — no build, no test step. Internal: the dispatch decision is
+// made in the relay's launch arm, nothing drives this module directly.
+pub(crate) mod program;
 // pub (not pub(crate)): the real-SDK breadth-count tests drive `build_filter`
 // directly — the filter the runner puts on argv is the filter under test.
 pub mod runner;

@@ -966,8 +966,10 @@ fn assign_to_job(job: *mut u8, pid: u32) -> bool {
 
 /// Does `pid` name a live process? The banner's pid is text off a stdout
 /// stream — text can be stale or lies. The OS must vouch for the number
-/// before the debugger is aimed at it.
-fn process_exists(pid: u64) -> bool {
+/// before the debugger is aimed at it. The manual `request=attach` lane
+/// (LOC-0130) aims the debugger at a client-named pid the same way, and
+/// asks this same question first.
+pub(crate) fn process_exists(pid: u64) -> bool {
     // pid 0 and 1 are OS-reserved: 0 means "the signal-group target" (and
     // the System/idle process), 1 is init on unix. Never a testhost — and
     // both probes below would answer "alive" for them by accident.
@@ -1343,8 +1345,10 @@ fn run(tunnel: Arc<Tunnel>, runner: RunnerConfig, mut config: LaunchConfig, laun
             }
             // The debugger receives `attach`, never the raw `launch`; the
             // adapter's attach answer becomes the answer to the client's
-            // launch request (in-flight correlation in the relay).
-            if let Err(e) = tunnel.attach_process(pid, launch_seq) {
+            // launch request (in-flight correlation in the relay). The
+            // client's word here is `launch` — LOC-0109's test lane keeps
+            // its byte-identical answer shape through the new parameter.
+            if let Err(e) = tunnel.attach_process(pid, launch_seq, "launch") {
                 fail_and_kill_test(
                     &tunnel,
                     &mut test,
@@ -1916,6 +1920,9 @@ mod tests {
             case_arguments: Vec::new(),
             method_parameters: Vec::new(),
             results_log: false,
+            // Program-mode fields default here: every runner test is a
+            // test-lane config.
+            ..Default::default()
         }
     }
 

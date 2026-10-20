@@ -178,6 +178,8 @@ starts from (a shell profile, or launching Zed from a terminal).
 | `ZATARA_RUNNER` | **on** | The in-proxy runner (build, paused test, attach) is ON by default — it is the only mode with unit-test support. Set `0` to opt out into the plain-relay dev seam (launch passed straight to netcoredbg). Any other value, including unset, stays on. |
 | `ZATARA_RUNNER_BANNER_TIMEOUT_SECS` | 30 | How long the runner waits for the vstest pause banner before giving up. Raise it on a machine where the first test host is slow to start. |
 | `ZATARA_FUZZY_MATCH` | off | Debug lane only. When the project search cannot decide — a folder naming several projects with no name match, or no ancestor folder naming one project at all — the nearest `.sln` going up answers instead: `dotnet test` builds the solution and your filter selects the tests. Set `1` to arm; two solutions in one folder stay dotnet's ambiguity error, and a provable answer always beats the fallback. The **Run lane** is a static task and cannot consult this: Zed has no per-OS task command, so Run points `dotnet test` at the repository root and trusts dotnet's own root resolution. |
+| `ZATARA_LAUNCH_MODE` | unset | Forces the dispatch lane a launch takes: `project` or `test`, exact values only — anything else (wrong case included) acts as unset and the config's own shape answers instead. Read by the proxy at its env boundary; never a wire field. The [Program debug](#program-debug) section is where it earns attention. |
+| `ZATARA_PROGRAM_BUILD` | shipped with the door task — `1` | The exact tag pair the shipped **zatara: build & debug (workspace)** task carries — the claimable entry the locator claims as a program door and the debug scenario derives from (the `ZATARA_TEST_FILTER` law again: near-miss values and other names claim nothing). The plain **zatara: build (workspace)** entry carries no tag and claims nothing. Not yours to set. |
 | `ZATARA_WORK_DIR` | set by the extension | The extension's work directory, which is the only place the proxy may write diagnostics. The extension always hands this over; you never set it. |
 | `ZATARA_RELEASE_WARNING` | reserved — set by nothing today | The seam a degraded session's reason *could* travel on. The extension logs its note to Zed's log directly and keeps this unset (owner ruling 2026-10-13: the degraded fact is a log note, never editor UI); a future proxy that consumes it must log it too. You never set it. |
 
@@ -223,10 +225,12 @@ names for the proxy:
 ### Debug scenario keys
 
 A hand-written debug.json for this adapter is one launch config, and the key set
-is deliberately narrow: the same contract that crosses the extension/proxy
-boundary — four required fields and one optional. Keys beyond these are
-**rejected, not ignored**, which is what makes a typo surface as an error
-instead of a wrong session.
+is deliberately narrow: it mirrors, key for key, the same contract that crosses the
+extension/proxy boundary (schema keys equal serde fields — SCHEMA_EQ). One key set
+serves both lanes: a config carrying a program or request key is a
+program/attach config, and every other config is a test-lane config that must name
+its target. Keys beyond these are **rejected, not ignored**, which is what makes a
+typo surface as an error instead of a wrong session.
 
 | Key | Level | Meaning |
 |-----|-------|---------|
@@ -238,15 +242,23 @@ instead of a wrong session.
 | `cwd` | config | The working directory the proxy builds and tests in. |
 | `env` | config | Environment the proxy forwards to build and test, as a map of string to string. |
 | `resultsLog` | config | Optional, default off. Set to true and the proxy appends dotnet's own `--logger trx` to the test step, so each run also writes a .trx results file under TestResults/ in the working directory. |
+| `program` | config | Program mode: the dll or apphost to debug. Its presence selects the program branch and releases the config from the test-lane keys. |
+| `args` | config | Arguments handed to the program. |
+| `request` | config | Which lane the config asks for: a program launch or a manual-pid attach. |
+| `process_id` | config | Manual-pid attach target, snake_case on purpose — the one deliberate exception to the camelCase vocabulary. |
+| `scope` | config | Gutter-click scope: method (default when absent), case, class, or file. The shipped gutter locator never emits it. |
+| `framework` | config | Test framework behind the target (nunit, mstest, xunit), consulted only for case scope. |
+| `caseArguments` | config | Displayed arguments of the invoked case, as displayed tokens. |
+| `methodParameters` | config | The invoked method's parameter names, zipped with `caseArguments` for the named-argument display. |
 
 The shipped schema is the machine-readable form of this table:
 `crates/zatara/debug_adapter_schemas/zatara-netcoredbg.schema.json`. The locator emits exactly
-the four required fields and nothing else — its launch config carries no scope or
-framework field at all (both are fixed absent and serialize as omitted keys), and
-it never flips resultsLog: a gutter Debug session runs unlogged, and only a
-hand-written config opts into the results file. A gutter Debug session therefore
-exists only for one exact test; class and parameterized-case clicks run on the task
-lane instead (see [Templates](#templates)).
+the test-lane fields it needs — `projectPath`, `fullyQualifiedName`, `cwd`, `env` —
+and nothing else: no scope or framework at all (both are fixed absent and
+serialize as omitted keys), and it never flips `resultsLog`: a gutter Debug session
+runs unlogged, and only a hand-written config opts into the results file. A gutter
+Debug session therefore exists only for one exact test; class and parameterized-case
+clicks run on the task lane instead (see [Templates](#templates)).
 
 ### Diagnostics gates
 
@@ -269,14 +281,183 @@ Copy-in starting points live in [`docs/templates/`](docs/templates/):
   test, the shape a gutter click produces.
 - [`class-scope.md`](docs/templates/class-scope.md) — a whole class runs as a
   gutter **Run**: `tasks.json` hands `dotnet test` a substring filter directly,
-  which no hand-written config can copy (the shipped schema has no `scope` key), so
-  there is no class-scope file to copy in.
+  and the shipped debug flow answers only exact test names, so there is no
+  class-scope file to copy in.
 - [`manual-attach.md`](docs/templates/manual-attach.md) — attach to a test host
   you started yourself, without this extension driving the session.
 
 Every shipped debug.json template is validated against the shipped schema by the
 test suite, so a template cannot rot into a schema warning; the `.md` pages (class
-scope, manual attach) document what a `debug.json` cannot carry.
+scope, manual attach) explain why those flows are not copy-in configs.
+
+## Program debug
+
+The gutter lanes debug tests. This section is the user truth for the other
+shape — a plain .NET program — as the shipped binaries and the probe notes
+record it. One law: every sentence here describes behavior that ships, and
+every win-only claim carries its recording status with it.
+
+### The primary path: shipped task, then F5
+
+Zero `.zed/` files. With the extension installed and the
+`languages.CSharp.debuggers` mapping from [Install](#install) in place:
+
+1. Run the shipped **zatara: build (workspace)** task (command palette,
+   `task: spawn`, pick it). It runs `dotnet build` at the worktree root and
+   claims nothing — the untagged plain build entry is safe to spawn at any
+   point in this flow, and the program step 2 launches is the output this
+   step just built.
+2. With a C# file open, press F5 and pick **zatara: build & debug (workspace)**.
+   This is the debug flow. The scenario is derived from the shipped task entry
+   of the same name, which carries the exact tag pair `ZATARA_PROGRAM_BUILD=1`
+   — the one thing that makes a task claimable as the program door, never
+   something you set by hand. The visibility probe (pinned at Zed stable
+   1.24.2) recorded the template scenario listed once an active C# buffer plus
+   that `debuggers` mapping are in place — both are conditions the install
+   already asks of you. A pinned entry (below) is listed unconditionally by
+   comparison.
+
+   One task-list caveat, measured live at Zed 1.24.2: the entry named
+   **zatara: build & debug (workspace)** also appears in the task list — it is
+   the surface the scenario derives from, not the entry to run. It is now
+   self-explaining: spawned from the task list it builds nothing and prints
+   the instruction instead (the scenario owns the build — the proxy builds
+   inside its pty). The spawn still moves the entry out of the fresh task list
+   for the window's life, and the scenario derives from that fresh entry, so
+   the F5 entry disappears until Zed is restarted — recoverable, and the
+   printed line says so. Build with the plain entry (step 1); debug with
+   F5 (step 2).
+   Two picker footnotes from the same measurement: extension task templates
+   are hidden from both pickers, by Zed's default, whenever the language
+   server ships its own tasks — set `"tasks": { "prefer_lsp": false }` in Zed
+   settings when zatara entries never list at all; and a spawned task or
+   scenario can always be relaunched from the pickers' history section,
+   which the fresh-list filter does not touch.
+3. At launch the proxy resolves the program, solution-first: a solution at the
+   root decides the project set, otherwise exactly one exe project under the
+   root wins, and its built dll — the one next to its csproj — is what runs.
+   The resolution never guesses: an ambiguous set fails naming every candidate
+   project, a root with nothing runnable fails naming the scanned root, and a
+   program the disk does not have fails naming the exact path — before the
+   debugger starts, never after.
+
+Breakpoints and stepping work as in a test session, and the debuggee's stdout
+comes back raw into the Console. A program session ends the way a session
+should: a nonzero exit arrives first as an error-level output line carrying the
+exit information, then `exited` and `terminated` close the stream — a nonzero
+exit maps to a failed session, and a clean exit closes without an error
+announcement. Stopping the session takes the adopted tree (program and
+netcoredbg) down with it, zero orphans, and a second session in the same
+project is untouched by the first one's teardown.
+
+`ZATARA_LAUNCH_MODE` is the knob for when the inference is not what you want:
+the exact values `project` or `test` force the dispatch lane, nothing else acts
+(a typo or wrong case never reroutes a launch — the config's own shape answers
+instead), and it never travels the wire as a field. The program flow's truth is
+recorded on Windows and Linux CI lanes; mac has no CI — the caveat travels with
+the win-only claims below.
+
+### The escape hatch: pin the program
+
+A config carrying `program` is a program launch: discovery is never consulted,
+the path you wrote runs, and `args` and `cwd` ride alongside it. That is the
+pinned path — `.zed/` per repo, or user level per the
+[cross-repo pinning recipe](#the-cross-repo-pinning-recipe). The worked pair
+ships in [`examples/program-debug/`](examples/program-debug/), and the
+directory's README names where each file goes. The pinned program is yours to
+build — the proxy never builds — so a pinned pair names its build:
+
+```sh
+dotnet build src/App/App.csproj
+```
+
+### Attach to a running pid (Should-rated, probe-gated)
+
+Manual-pid attach ships: a config carrying `"request": "attach"` and
+`process_id` attaches netcoredbg to a running process through the same relay.
+Zed routes the shape as an attach, and the proxy vouches for the pid with the
+OS first — a pid naming no running process answers a clean DAP error naming the
+pid. The status is truth, not polish: this is a Should-rated lane, and its
+behavior is probe-gated — on the pinned netcoredbg build (3.2.0-1092) the
+LOC-0134 spike measured that breakpoints do **not** bind in attach sessions.
+Interrupt, inspect, and resume work; do not plan a breakpoint-driven attach
+session on this build. A stop carrying `terminateDebuggee: true` kills the
+attached-to process; the Zed stop shape (without the flag) releases it. The
+attach truth is recorded on Windows — no mac CI. The rendezvous steps are in
+[manual-attach.md](docs/templates/manual-attach.md).
+
+### The cross-repo pinning recipe
+
+Pinning a profile at user level means one file, read from every repo. What
+follows is the recorded observation from the LOC-0135 probe — quoted from
+[docs/LOC-0135-user-level-merge-probe.md](docs/LOC-0135-user-level-merge-probe.md),
+audited on Windows at Zed 1.24.2 (no mac CI) — and where the probe marked a
+step human-walkthrough-owed, the step appears as a marked gap below, never as
+an invented UI instruction.
+
+- **Cross-repo visibility (VERDICT-1).** Entries in the user-level
+  `debug.json` / `tasks.json` are visible from every repo: each project opens
+  its own settings observer on the single user files, and the global map is
+  appended to every scenario and task list.
+- **Collision (VERDICT-2).** Neither level replaces the other — same-label
+  entries from user and project level COEXIST and both are listed. The project
+  copy sorts first, and a label lookup resolves to the project copy; debug
+  scenarios carry no dedup at all. A user-level entry is therefore safe to pin
+  across repos, but a project entry with the same label shadows it
+  positionally — to replace behavior wholesale, the labels must differ.
+- **Where the user-level files live on Windows (VERDICT-3).**
+  `%APPDATA%\Zed\debug.json` and `%APPDATA%\Zed\tasks.json`. The tasks docs
+  say the global `tasks.json` is "usually located in
+  `~/.config/zed/tasks.json`" — on Windows that path is never read; the source
+  resolves AppData, and the recipe follows the source (both cited in the probe
+  note).
+- **Project-level locations (VERDICT-4).** Per worktree: `.zed/tasks.json`,
+  `.vscode/tasks.json`, `.zed/debug.json`, `.vscode/launch.json`. A repo-root
+  `debug.json` or `tasks.json` is not read. If a `.zed` dir contributes
+  anything, that worktree's `.vscode` entries are suppressed, and project
+  config files wait until the worktree is trusted.
+- **The modal gate (VERDICT-5).** A scenario is listed only if its DAP adapter
+  is installed — a user-level zatara profile shows up only in windows where the
+  zatara extension is installed.
+- **"Pinned entry" (VERDICT-6).** 1.24.2's debugger UI has no pin feature; a
+  pinned entry is an entry pinned in the user-level config file — and per
+  VERDICT-1 those genuinely live across repos. The recency list is per-project
+  and in memory, not cross-repo.
+
+One user-level pin for the pinned-program path — the same array shape, one more
+element, in `%APPDATA%\Zed\debug.json` on Windows:
+
+```json
+{
+  "label": "zatara: pinned App (user level, every repo)",
+  "adapter": "zatara-netcoredbg",
+  "config": {
+    "program": "C:/work/app/src/App/bin/Debug/net9.0/App.dll",
+    "cwd": "C:/work/app/src/App"
+  }
+}
+```
+
+The live-UI half of this recipe was marked owed by the probe. Each marker is
+the deferred done-condition — the probe's own step, quoted, not an invented
+click path:
+
+- not yet confirmed: install the probe's user-level fixtures, open its
+  repo-alpha, and confirm the picker lists the user profile and BOTH copies of
+  the collision twin, with the project copy rendered above the user copy
+- not yet confirmed: with the same user files installed, open repo-beta in a
+  second window and confirm its picker shows the user profile and its own
+  profile but not the other repo's project profile — project entries do not
+  cross repos, user entries do
+- not yet confirmed: in both windows open the task modal and confirm the user
+  global task lists in both repos while each repo's own task lists only at home
+- not yet confirmed: with a window left open, delete `%APPDATA%\Zed\debug.json`
+  and confirm the user-level profiles disappear from the debug picker without
+  restarting Zed
+
+The recipe's win-only parts — the AppData path and the probed picker — carry
+the same limitation stated everywhere in this section: recorded on Windows, no
+mac CI.
 
 ## Troubleshooting
 

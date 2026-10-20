@@ -107,16 +107,92 @@ fn adapter_spec(
     request_configuration: String,
     work_dir: &Path,
 ) -> DebugAdapterBinary {
+    // T3 law (clean-room live finding, owner, Zed 1.24.2+stable.373): this
+    // request kind IS the DAP command Zed sends — Zed builds the launch or
+    // attach request from request_args (session initialize_sequence), never
+    // from the dap_request_kind probe. Hardcoding Launch here made a
+    // hand-written attach scenario arrive at the proxy as a launch, where
+    // the test-lane rule rejected it ("missing field
+    // `fullyQualifiedName`"). The kind therefore rides the config itself,
+    // through the one shared rule.
+    let (configuration, request) = launch_request_shape(&request_configuration);
     DebugAdapterBinary {
         command: Some(command.display().to_string()),
         arguments,
         envs: vec![(WORK_DIR_ENV.to_string(), work_dir.display().to_string())],
         cwd: None,
         connection: None,
-        request_args: StartDebuggingRequestArguments {
-            configuration: request_configuration,
-            request: StartDebuggingRequestArgumentsRequest::Launch,
-        },
+        request_args: StartDebuggingRequestArguments { configuration, request },
+    }
+}
+
+/// The two wire facts a session config carries, read in one place: the
+/// configuration string the proxy receives as the DAP arguments, and the
+/// request kind Zed turns into the DAP command.
+///
+/// Two shapes arrive from Zed. Locator-built scenarios carry the flat
+/// launch config — its bytes are law (the LOC-0109 pin), so an unpeeled
+/// config is returned verbatim. Hand-written `.zed/debug.json` entries can
+/// arrive one layer deeper, wrapped under a single `config` key (measured
+/// live at the T3 clean-room session: `{"config":{"request":"attach",
+/// "process_id":…}}`). The proxy's contract is the flat zatara-types shape
+/// either way, so any such wrapper is peeled before it reaches the wire.
+/// Unparseable configurations ride through untouched as a launch —
+/// reject-don't-ignore stays the proxy's job, not the guest's.
+pub fn launch_request_shape(
+    request_configuration: &str,
+) -> (String, StartDebuggingRequestArgumentsRequest) {
+    let parsed = serde_json::from_str::<serde_json::Value>(request_configuration).ok();
+    let kind = parsed
+        .as_ref()
+        .map(request_kind_of)
+        .unwrap_or(StartDebuggingRequestArgumentsRequest::Launch);
+    let configuration = match &parsed {
+        Some(value) => {
+            let peeled = scenario_config_peeled(value);
+            if peeled != value {
+                peeled.to_string()
+            } else {
+                request_configuration.to_string()
+            }
+        }
+        None => request_configuration.to_string(),
+    };
+    (configuration, kind)
+}
+
+/// The peel rule both DAP answers share: an object of exactly one `config`
+/// key whose value is an object is a wrapper, not a shape — step through
+/// it (wrappers may nest). Anything else — a multi-key object,
+/// `{"config": "a string"}`, a non-object — is the shape itself.
+pub fn scenario_config_peeled(config: &serde_json::Value) -> &serde_json::Value {
+    let mut current = config;
+    loop {
+        let next = match current {
+            serde_json::Value::Object(map) if map.len() == 1 => match map.get("config") {
+                Some(inner @ serde_json::Value::Object(_)) => Some(inner),
+                _ => None,
+            },
+            _ => None,
+        };
+        match next {
+            Some(inner) => current = inner,
+            None => return current,
+        }
+    }
+}
+
+/// The request kind of a (possibly wrapper-shape) scenario config, shared
+/// by the get_dap_binary wire answer and the `dap_request_kind` probe so
+/// the two answers can never drift: a config naming `request: "attach"`
+/// answers Attach, everything else — launch, test lane, unclassifiable —
+/// answers Launch, the answer every shipped config already relied on.
+pub fn request_kind_of(
+    config: &serde_json::Value,
+) -> StartDebuggingRequestArgumentsRequest {
+    match scenario_config_peeled(config).get("request").and_then(serde_json::Value::as_str) {
+        Some("attach") => StartDebuggingRequestArgumentsRequest::Attach,
+        _ => StartDebuggingRequestArgumentsRequest::Launch,
     }
 }
 

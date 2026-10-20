@@ -1,9 +1,13 @@
-//! Locator eligibility + scenario builder (LOC-0114 AC1).
+//! Locator eligibility + scenario builder (LOC-0114 AC1, LOC-0128).
 //!
-//! A zatara gutter action is recognisable by one env pair: the exact-FQN
-//! filter tasks.json ships in `ZATARA_TEST_FILTER` (LOC-0105's tag/env
-//! contract). Everything else here is path math and JSON shape — the only
-//! two things DR-7 lets this crate do.
+//! Two claims, two shipped env tags, no inference between them. A zatara
+//! gutter action is recognisable by one env pair: the exact-FQN filter
+//! tasks.json ships in `ZATARA_TEST_FILTER` (LOC-0105's tag/env contract).
+//! The program-build door is recognisable by the other: the exact
+//! `ZATARA_PROGRAM_BUILD=1` pair LOC-0127's template ships (DR-3: exact tag
+//! only — near-miss values and other env claim nothing). Everything else
+//! here is path math and JSON shape — the only two things DR-7 lets this
+//! crate do.
 //!
 //! The scenario carries `build: None` (epic DR-2): the proxy builds and
 //! tests inside its own pty, so the scenario's `config` is the LOC-0106
@@ -95,6 +99,76 @@ pub fn launch_config(build_task: &TaskTemplate) -> Option<LaunchConfig> {
         case_arguments: Vec::new(),
         method_parameters: Vec::new(),
         results_log: false,
+        // The program-mode field set is absent too: a gutter action is
+        // always a test-lane config, and every program-mode field is
+        // omit-if-none — the emitted bytes stay the LOC-0109 shape.
+        ..Default::default()
+    })
+}
+
+/// The env key LOC-0127's shipped build door carries its eligibility tag in.
+pub const PROGRAM_BUILD_ENV: &str = "ZATARA_PROGRAM_BUILD";
+/// The exact tag value the door ships — the string `1`, never a truthy
+/// spelling, never padded (DR-3: exact tag only, no shadowing).
+pub const PROGRAM_BUILD_TAG: &str = "1";
+
+/// The debug-side label every program scenario carries, and the label of
+/// the claimable task entry itself. The shipped pair (Zed 1.24.x law,
+/// measured live 2026-10-17): Zed deduplicates a spawned task out of the
+/// fresh task list for the life of the project window, and the debug
+/// scenario is derived only from a FRESH task — so the entry a user spawns
+/// as a plain build (`zatara: build (workspace)`, untagged) must never be
+/// the entry the locator claims. Sharing this label with the claimable task
+/// is what makes one name across the task list and the debug picker; DR-3
+/// still claims by the env tag alone, which now ships on the claimable
+/// entry, not the plain-build entry (supersedes the same-day label-decouple
+/// ruling — spawned-door dedup made the old shape self-defeating).
+pub const PROGRAM_SCENARIO_LABEL: &str = "zatara: build & debug (workspace)";
+
+/// Whether a task is the shipped program-build door: its env carries the
+/// exact tag pair. Absent, near-miss, or differently-named env claims
+/// nothing — eligibility is the tag, never an inference.
+pub fn claims_program_build(build_task: &TaskTemplate) -> bool {
+    build_task
+        .env
+        .iter()
+        .any(|(key, value)| key == PROGRAM_BUILD_ENV && value == PROGRAM_BUILD_TAG)
+}
+
+/// Builds the program-mode scenario for a claimed door task: the launch-time
+/// hint pair only — `projectPath` and `cwd` both carry the task's cwd (the
+/// worktree root), with no path math and no template expansion (the
+/// single-occurrence law from the gutter lane; `$ZED_WORKTREE_ROOT` passes
+/// through and Zed expands it once, later). No `program` field: discovery
+/// resolves the program at launch (LOC-0129). The task's env is NOT copied —
+/// scenario creation resolves nothing (the echo-fallback / deferred-task
+/// precedent), so no `${env:...}` literal can bake into the config.
+/// A door task without a cwd has no root to hint and is declined, not
+/// invented.
+pub fn program_scenario(
+    build_task: &TaskTemplate,
+    _resolved_label: String,
+    debug_adapter_name: String,
+) -> Option<DebugScenario> {
+    if !claims_program_build(build_task) {
+        return None;
+    }
+    let root = build_task.cwd.clone()?;
+    // The one contract definition serializes the hint (SCHEMA_EQ): an empty
+    // FQN is key-absent, so the emitted config is exactly the pair.
+    let config = LaunchConfig {
+        project_path: root.clone(),
+        cwd: root,
+        ..Default::default()
+    };
+    Some(DebugScenario {
+        // The debug-side name - the same name the claimable task entry
+        // carries, so the picker and the task list agree.
+        label: PROGRAM_SCENARIO_LABEL.into(),
+        adapter: debug_adapter_name,
+        build: None,
+        config: serde_json::to_string(&config).ok()?,
+        tcp_connection: None,
     })
 }
 

@@ -111,5 +111,20 @@
     "hide": "never",
     "show_command": false,
     "show_summary": false
+  },
+  {
+    "label": "zatara: build (workspace)",
+    "command": "dotnet",
+    "args": ["build", "\"$ZED_WORKTREE_ROOT\""],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "zatara: build & debug (workspace)",
+    "command": "echo",
+    "args": ["\"[zatara] * This run task entry cannot be hidden and it does not work from the run menu. It will also remove the debug panel entry needed to debug until Zed is restarted. Open the Zed Debug panel, pick zatara: build & debug (workspace) in that list for debugging *\""],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "ZATARA_PROGRAM_BUILD": "1"
+    }
   }
 ]
