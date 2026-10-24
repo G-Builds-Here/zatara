@@ -555,12 +555,8 @@ the tests pin is meant to stay pinned.
   adapter this extension drives; its releases are fetched SHA256-verified.
 - [zed-industries/zed](https://github.com/zed-industries/zed) — the editor, the
   extension API, and the task/locator model the gutter actions ride on.
-- The .NET test platform's `VSTEST_HOST_DEBUG` pause contract — the parked
-  `testhost` is the seam that makes debugging a test possible at all.
 - xunit, nunit, and mstest — the frameworks whose discovery and filter syntax
   the gutter actions speak.
-- The proven Windows-only prototype this design follows — a reference, not a
-  fork.
 
 ## License
 
