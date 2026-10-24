@@ -120,13 +120,13 @@ Intel macOS: upstream ships no Intel build, so it is a source build
 ## Debug, then let it finish (both lanes)
 
 Breakpoints do NOT bind in attach sessions on the build this extension pins
-(netcoredbg 3.2.0-1092, measured in the LOC-0134 spike): MI and CLI inserts
+(netcoredbg 3.2.0-1092, measured live 2026-10): MI and CLI inserts
 carry the warning "No executable code of the debugger's target code type is
 associated with this line", DAP `setBreakpoints` answers `"verified":false`,
 and zero hits were observed on either target shape. You can interrupt and
 inspect (the CLI's `interrupt` stops all threads, and thread state answers
 while stopped), but do not plan a breakpoint-driven session on this build:
-the spike measured the refusal even against a paused testhost over the same
+the refusal was measured even against a paused testhost over the same
 DAP surface the extension relays.
 Press continue to run the test to completion; the `Passed!` summary and the
 process exit appear in the terminal that owns the `dotnet test` window, not in
@@ -141,13 +141,13 @@ the debugger's.
   that same output into Zed's Console.
 - **A paused `testhost` does not survive the session.** The resume that
   configures a session releases the paused test to run: it completes and its
-  host exits with it — measured by the LOC-0134 spike and again on the shipped
+  host exits with it — measured live 2026-10 and again on the shipped
   lane with the pinned real adapter (2026-10-16). Plan for the host to die
   with the session.
 - **A Zed session stop KILLS the attached-to process too.** A stop carrying
-  `terminateDebuggee: true` kills within seconds (probe row 11, reproduced on
-  the shipped lane). The Zed stop is not the flagless `disconnect` the LOC-0134
-  spike assumed: Zed sends DAP `terminate` (`{"restart": false}`) and netcoredbg
+  `terminateDebuggee: true` kills within seconds (measured live, reproduced on
+  the shipped lane). The Zed stop is not the flagless `disconnect` an earlier
+  reading assumed: Zed sends DAP `terminate` (`{"restart": false}`) and netcoredbg
   honors it — the attached-to process died within a second, 2/2 live Zed 1.24.2
   runs on 2026-10-20, the request wire-captured at the proxy→engine relay. zatara
   relays what it is given and invents nothing: no synthesized detach, no hidden
@@ -156,10 +156,10 @@ the debugger's.
   `detach`, MI `-target-detach`) before the session ends.
 - **A debugger that dies mid-session takes the attached-to process with it.**
   The OS debug stack tears the target down when its debugger goes while still
-  attached (probe row 12) — a crashed netcoredbg is not a detach. A surviving
+  attached (verified live) — a crashed netcoredbg is not a detach. A surviving
   `testhost` from a deliberate detach still locks build outputs — the next
   `dotnet build` fails with MSB3026/MSB3027 until it is gone (`taskkill /PID
-  34060 /T /F` on Windows, `kill 34060` elsewhere).
+  <pid> /T /F` on Windows, `kill <pid>` elsewhere).
 - **No exact-FQN guarantee from a substring filter.** Same rule as the gutter:
   `FullyQualifiedName=` matches one test; `FullyQualifiedName~` selects a set,
   and attaching to whichever host vstest happened to start first is not

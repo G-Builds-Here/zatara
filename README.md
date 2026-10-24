@@ -4,9 +4,7 @@ Run and debug .NET unit tests from the Zed editor gutter, powered by
 [netcoredbg](https://github.com/Samsung/netcoredbg).
 
 This README is the user's surface: what you need, how to install, how to use
-it, what you can configure, and what to do when a symptom appears. The internal
-design, the project's maturity ledger, and the development workflow live in
-[CONTRIBUTING.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md).
+it, what you can configure, and what to do when a symptom appears.
 
 ## Requirements
 
@@ -97,7 +95,7 @@ through Zed's task pseudo-terminal, so its stream is captured to a temp file
 and typed back. Plain-pipe shells prove the law is the terminal, not the run. `[MemberData]`/`[ClassData]` theories run from the test method's own
 gutter icon — the whole theory, every row. The data definitions themselves
 (an `IEnumerable<object[]>`/`TheoryData` method, field, or sibling class)
-carry no gutter icons: owner ruling 2026-10-21. An icon riding a row inside
+carry no gutter icons — by design. An icon riding a row inside
 the data object reads as "run this test with this row" from a place that is
 not the test, and a per-row option on the theory itself cannot exist — Zed
 resolves one task per gutter position (same position + same tag keeps only
@@ -119,8 +117,7 @@ one short listing pass, and the Run tab names the row it ran. Rows whose
 runner name cannot be rebuilt from the source text — custom display names,
 enum expressions like flag combinations or casts — decline with a message
 pointing at the method's gutter arrow instead of silently running a wider set.
-(The match mechanics and the measurements behind them live with the code —
-`mtp_case` in the proxy and the v3 probe doc in the dev repository.)
+(The match mechanics live with the code — `mtp_case` in the proxy.)
 
 ## What you see
 
@@ -152,9 +149,9 @@ The gutter and panel layout, schematically:
                                                             └───────────┘
 ```
 
-A recorded GIF of a live editor session belongs here once the editor wiring in
-[Status](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md#status) lands. Until then, both halves of the picture above are
-derived from checks you can run, not from a description:
+A recorded GIF of a live editor session belongs here once a session has been
+captured. Until then, both halves of the picture above are derived from checks
+you can run, not from a description:
 
 - **Which gutter icons appear, and the exact filter each click emits**, are
   asserted by the language-asset harness — `npm test` in the repository's
@@ -226,7 +223,7 @@ starts from (a shell profile, or launching Zed from a terminal).
 | `ZATARA_PROGRAM_BUILD` | shipped with the door task — `1` | The exact tag pair the shipped **zatara: build & debug (workspace)** task carries — the claimable entry the locator claims as a program door and the debug scenario derives from (the `ZATARA_TEST_FILTER` law again: near-miss values and other names claim nothing). The plain **zatara: build (workspace)** entry carries no tag and claims nothing. Not yours to set. |
 | `ZATARA_CASE_RAW_1`, `ZATARA_CASE_RAW_2`, `ZATARA_CASE_RAW_3` | shipped with the generic InlineData case tasks — the slot's value as written in source | RAW envs: the shipped generic row task of the row's arity carries every slot's value exactly as written in source — a string slot WITH its quotes, a primitive slot bare. The locator forwards them verbatim into the debug scenario's `caseRawArguments`, and in whichever lane launches the row a value beginning with a double quote marks that slot's string lane: its filter part is the bare content, not `param: value` (the [AND-substring law](#first-gutter-debug): quotes never survive the filter transport). Not yours to set. |
 | `ZATARA_WORK_DIR` | set by the extension | The extension's work directory, which is the only place the proxy may write diagnostics. The extension always hands this over; you never set it. |
-| `ZATARA_RELEASE_WARNING` | reserved — set by nothing today | The seam a degraded session's reason *could* travel on. The extension logs its note to Zed's log directly and keeps this unset (owner ruling 2026-10-13: the degraded fact is a log note, never editor UI); a future proxy that consumes it must log it too. You never set it. |
+| `ZATARA_RELEASE_WARNING` | reserved — set by nothing today | The seam a degraded session's reason *could* travel on. The extension logs its note to Zed's log directly and keeps this unset (by design: the degraded fact is a log note, never editor UI); a future proxy that consumes it must log it too. You never set it. |
 
 Two binaries are resolved per session, by different parties, so the two chains
 are worth keeping apart.
@@ -430,8 +427,8 @@ Manual-pid attach ships: a config carrying `"request": "attach"` and
 Zed routes the shape as an attach, and the proxy vouches for the pid with the
 OS first — a pid naming no running process answers a clean DAP error naming the
 pid. The status is truth, not polish: this is a Should-rated lane, and its
-behavior is probe-gated — on the pinned netcoredbg build (3.2.0-1092) the
-LOC-0134 spike measured that breakpoints do **not** bind in attach sessions.
+behavior is probe-gated — on the pinned netcoredbg build (3.2.0-1092) a
+live probe measured that breakpoints do **not** bind in attach sessions.
 Interrupt, inspect, and resume work; do not plan a breakpoint-driven attach
 session on this build. A session stop kills the attached-to process either
 way: `terminateDebuggee: true` kills it, and so does the DAP `terminate`
@@ -442,10 +439,7 @@ attach truth is recorded on Windows — no mac CI. The rendezvous steps are in
 ### The cross-repo pinning recipe
 
 Pinning a profile at user level means one file, read from every repo. What
-follows is the recorded observation from the LOC-0135 probe — quoted from
-[docs/LOC-0135-user-level-merge-probe.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/docs/LOC-0135-user-level-merge-probe.md),
-audited on Windows at Zed 1.24.2 (no mac CI) — and where the probe marked a
-step human-walkthrough-owed, the step appears as a marked gap below, never as
+follows is a recorded live observation, audited on Windows at Zed 1.24.2 (no mac CI) — and where the observation left a step human-walkthrough-owed, the step appears as a marked gap below, never as
 an invented UI instruction.
 
 - **Cross-repo visibility (VERDICT-1).** Entries in the user-level
@@ -515,7 +509,7 @@ mac CI.
 
 | Symptom | Cause and fix |
 |---------|---------------|
-| Zed never offers `zatara-netcoredbg` as a debugger, or the gutter Debug action goes nowhere | The adapter/locator declaration gap in [Status](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md#status), or the per-language `debuggers` key does not match your language name exactly. |
+| Zed never offers `zatara-netcoredbg` as a debugger, or the gutter Debug action goes nowhere | The adapter/locator declaration does not yet cover this case, or the per-language `debuggers` key does not match your language name exactly. |
 | Gutter Run/Debug icons do not appear right after installing the extension | Zed attaches an extension's tasks and test markers when a project opens — after installing, close the project and reopen it (or restart Zed) before the icons show. Fresh-reader observation, 2026-10-14: the gutter appeared only after the project was removed and reloaded. |
 | "None of the locators for task … completed successfully" | The task is not a zatara gutter action: it needs `ZATARA_TEST_FILTER` with an exact `FullyQualifiedName=` filter — or, for a shipped "Run case" task, the substring form plus the `ZATARA_TEST_CASE=1` scope tag. (Where the test sits — the project folder or any folder inside it — the proxy's project search resolves the Debug lane's target itself.) |
 | Run prints MSB1003 or MSB1011 | A static Run task runs `dotnet test` against the repository root and lets dotnet find the project there (a solution, or exactly one project, subfolders included). A root that holds several projects with no solution is dotnet's ambiguity error to refuse — arm `ZATARA_FUZZY_MATCH=1` and the Debug lane will take the nearest solution instead, or add a solution at the root. The xunit case-row Run launcher is the exception: its proxy resolves the project first (the Debug lane's walk-up law) and declines honestly when it cannot. |
@@ -541,8 +535,18 @@ the project's maturity.
 
 ## Contributing
 
-Build commands, the internal design, the maturity ledger, and the full
-postmortem of the 2026-10 build are in [CONTRIBUTING.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md).
+Contributions are made from this repository: fork it, branch from `main`, and
+open a pull request. The workspace builds and tests with the toolchain pinned
+in `rust-toolchain.toml`:
+
+```sh
+cargo build --workspace
+cargo test --workspace
+```
+
+The release asset tooling lives in `scripts/`, the tagged-publisher workflow in
+`.github/workflows/`, and the extension manifest in `extension.toml`. Anything
+the tests pin is meant to stay pinned.
 
 ## Credits
 

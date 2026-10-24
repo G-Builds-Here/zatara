@@ -89,7 +89,7 @@ context is a single `TaskContext` — one value per variable — and one templat
 resolves to one task per context, so N row-matches at one position collapse to the
 last one (measured live 2026-10-21: only the final row of a three-row source was
 selectable). zatara therefore runs the whole theory from the test method's own icon and
-points per-row targeting at the manual-attach template (owner ruling
+points per-row targeting at the manual-attach template (by design
 2026-10-21: no icons on data-definition lines — a row inside another object
 reads as a test it is not). The ask, when
 filed: let one position offer N resolved variants of one template (per captured
