@@ -13,19 +13,9 @@ serde_json = "1"
 zatara-types = { path = "../zatara-types" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-[features]
-test-fake-adapter = []
 [[bin]]
 name = "zatara-proxy"
 path = "src/main.rs"
 [[bin]]
 name = "zatara-run-case"
 path = "src/bin/run_case.rs"
-[[bin]]
-name = "zatara-fake-adapter"
-path = "src/bin/fake_adapter.rs"
-required-features = ["test-fake-adapter"]
-[[bin]]
-name = "zatara-fake-dotnet"
-path = "src/bin/fake_dotnet.rs"
-required-features = ["test-fake-adapter"]

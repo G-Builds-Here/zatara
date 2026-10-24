@@ -521,17 +521,18 @@ mac CI.
 | The next build fails with file locks after a stopped session | A test host survived the stop. Retry the session; the proxy records every child it adopts and takes the whole tree down on stop and on crash, so a survivor is a bug worth reporting. |
 | `no xunit v3 test case matches ...` when Running/Debugging one xunit v3 row | The clicked row's runner-side name cannot be rebuilt from the source text (custom display names, enum flag/cast expressions). Run the method's gutter arrow to run all of its rows; the decline message names the method. |
 
-## Upstream backlog
+## Upstream gaps
 
-Four known gaps belong to upstream projects rather than to this extension: the
-test-run completion affordance in Zed's debug panel, coordination with the C#
-language assets, locator ergonomics when no build task is involved, and
-per-OS commands in extension-contributed tasks (the shape the Run lane needs
-and Zed's task schema does not offer). They are
-listed with a one-line status each in
-[`UPSTREAM-BACKLOG.md`](UPSTREAM-BACKLOG.md), which lives in this repository —
-nothing is filed against a third-party tracker until the owner opens that gate on
-the project's maturity.
+Five rough edges belong to upstream projects rather than to this extension.
+Each row is the gap and what it costs a user — nothing more.
+
+| Gap | What it costs you |
+|---|---|
+| The debug panel has no finished-run state for a test run | A gutter debug run of a test shows no pass/fail in the panel; the answer is the Console tab's `Passed!`/`Failed!` summary. |
+| No coordination over who owns .NET test gutter icons | With another C# extension also installed you can see two sets of gutter icons for the same test; either set runs the test. |
+| No debug-task scenario without a build step | Nothing to do — the proxy builds the project itself; this is why a gutter debug task's build step looks like a no-op echo. |
+| One command per contributed task, for every OS | The Run lane carries one bare cross-OS command; the per-folder project logic the Debug lane applies cannot be expressed for the Run lane. |
+| One task choice per gutter position | A `[MemberData]`/`[ClassData]` theory cannot offer one run option per source row: the method's gutter icon runs all of its rows, and single-row targeting is the manual-attach template's lane. |
 
 ## Contributing
 
