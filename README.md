@@ -68,56 +68,75 @@ the suites exercise.
    that is the framework calling your test, not a bug in this extension. Press
    Continue.
 
-The debug path answers an exact-FQN filter (`ZATARA_TEST_FILTER` set to
-`FullyQualifiedName=` plus one full name), and it answers a substring filter
-(`FullyQualifiedName~`) only when the same task carries the explicit
-`ZATARA_TEST_CASE=1` scope tag and the task's numbered case-argument envs — the
-shipped "Run case" tasks do, and the proxy rebuilds the row predicate from the
-captured arguments rather than trusting the filter text. A substring filter
-without the tag is still declined on purpose — that is how a debug session
-silently ends up attached to the wrong set of tests. The no-debugger **Run**
-lane is a different matter and legitimately selects a set.
-`crates/zatara/languages/csharp/tasks.json` ships static substring
-filters for its "Run class" action and its nunit/mstest "Run case" actions, and
-exact FQNs for a single method. An xunit `[InlineData]` row Run rides a
-per-arity generic task instead: its command is the package-root launcher
-(`run-case.cmd`), which resolves the shipped proxy and the console helper
-(`zatara-run-case.exe`) beside it. The row's identity travels through the
-injected `ZED_CUSTOM_csharp_*` capture env with zero argv, so no shell
-metacharacter can reach the composed line, and the same AND-substring filter
-the debug lane composes is composed here. The test run's exit code reaches the
-Run tab unchanged. The launcher is a CRLF batch file (cmd.exe silently
-abandons an LF-only batch block). It runs the console-subsystem helper when
-present — its output then streams into the Run tab as it happens, dotnet's
-verdict color included (live-proven 2026-10-24) — and otherwise keeps the
-buffered hop: the proxy is a GUI-subsystem binary and cannot stream live
-through Zed's task pseudo-terminal, so its stream is captured to a temp file
-and typed back. Plain-pipe shells prove the law is the terminal, not the run. `[MemberData]`/`[ClassData]` theories run from the test method's own
-gutter icon — the whole theory, every row. The data definitions themselves
-(an `IEnumerable<object[]>`/`TheoryData` method, field, or sibling class)
-carry no gutter icons — by design. An icon riding a row inside
-the data object reads as "run this test with this row" from a place that is
-not the test, and a per-row option on the theory itself cannot exist — Zed
-resolves one task per gutter position (same position + same tag keeps only
-the last match). Targeting one member-data row remains the
-[manual-attach template](docs/templates/manual-attach.md)'s lane.
-An `[InlineData]` row that contains strings carries case icons too, filtered by
-the AND-substring law: every slot contributes one `&`-joined substring part — a
-string slot its bare content, a primitive slot `param: value`. The two measured
-boundaries (2026-10-21): content matches as a substring, so a row's filter also
-selects a row whose string merely contains it (`("a",1,true)` also runs
-`("ab",1,true)` when both exist); and quotes never survive the filter transport,
-so the exact display name `dotnet test --list-tests` prints (`s: "a"`) matches
-zero tests — the bare content is all a filter can ever ship.
-An xunit v3 (Microsoft Testing Platform) project picks that same row a
-different way: its runner cannot filter by arguments at all, so a v3 row click
-asks the built test program which rows it has, finds the clicked row among
-them, and runs just that one. A v3 plain Run therefore builds first and pays
-one short listing pass, and the Run tab names the row it ran. Rows whose
-runner name cannot be rebuilt from the source text — custom display names,
-enum expressions like flag combinations or casts — decline with a message
-pointing at the method's gutter arrow instead of silently running a wider set.
-(The match mechanics live with the code — `mtp_case` in the proxy.)
+### What one gutter click selects
+
+**Debug lane — exact, or nothing.**
+
+- The debug path answers an exact-FQN filter: `ZATARA_TEST_FILTER` set to
+  `FullyQualifiedName=` plus one full name.
+- It answers a substring filter (`FullyQualifiedName~`) only when the same
+  task carries the explicit `ZATARA_TEST_CASE=1` scope tag and the task's
+  numbered case-argument envs — the shipped "Run case" tasks do. There the
+  proxy rebuilds the row predicate from the captured arguments rather than
+  trusting the filter text.
+- An untagged substring filter is declined on purpose — that is how a debug
+  session silently ends up attached to the wrong set of tests.
+
+**Run lane (no debugger) — selecting a set is legitimate.**
+
+- The `dotnet test` commands shipped in
+  `crates/zatara/languages/csharp/tasks.json` are static: substring filters
+  for the "Run class" and nunit/mstest "Run case" actions, exact FQNs for a
+  single method.
+- An xunit `[InlineData]` row Run rides a per-arity generic task whose command
+  is the package-root launcher (`run-case.cmd`), resolving the shipped proxy
+  and the console helper (`zatara-run-case.exe`) beside it. The row's identity
+  travels through the injected `ZED_CUSTOM_csharp_*` capture env with zero
+  argv, so no shell metacharacter can reach the composed line, and the same
+  AND-substring filter the debug lane composes is composed here. The test
+  run's exit code reaches the Run tab unchanged.
+- A row that contains strings carries case icons too, filtered by the
+  AND-substring law: every slot contributes one `&`-joined substring part — a
+  string slot its bare content, a primitive slot `param: value`.
+- When the console helper is present its output streams into the Run tab as it
+  happens, dotnet's verdict color included. Otherwise the hop is buffered: the
+  proxy is a GUI-subsystem binary and cannot stream live through Zed's task
+  pseudo-terminal, so its stream is captured to a temp file and typed back.
+  (The launcher is a CRLF batch file — cmd.exe silently abandons an LF-only
+  batch block.)
+
+**Substring matching has two permanent boundaries (measured 2026-10-21).**
+
+- Content matches as a substring, so a row's filter also selects a row whose
+  string merely contains it: when both exist, the filter of `("a",1,true)`
+  also runs `("ab",1,true)`.
+- Quotes never survive the filter transport, so the exact display name
+  `dotnet test --list-tests` prints (`s: "a"`) matches zero tests — the bare
+  content is all a filter can ever ship.
+
+**xunit v3 rows are discovered, not filtered.**
+
+- An xunit v3 (Microsoft Testing Platform) runner cannot filter by arguments
+  at all. A v3 row click asks the built test program which rows it has, finds
+  the clicked row among them, and runs just that one. A v3 plain Run
+  therefore builds first and pays one short listing pass, and the Run tab
+  names the row it ran.
+- Rows whose runner-side name cannot be rebuilt from the source text (custom
+  display names, enum expressions like flag combinations or casts) decline
+  with a message pointing at the method's gutter arrow instead of silently
+  running a wider set.
+
+**`[MemberData]`/`[ClassData]` run the whole theory.**
+
+- A data theory runs from the test method's own gutter icon — the whole
+  theory, every row. The data definitions themselves (an
+  `IEnumerable<object[]>`/`TheoryData` method, field, or sibling class) carry
+  no gutter icons, by design: an icon riding a row inside the data object
+  reads as "run this test with this row" from a place that is not the test.
+- A per-row option on the theory itself cannot exist: Zed resolves one task
+  per gutter position (same position + same tag keeps only the last match).
+  Targeting one member-data row is the
+  [manual-attach template](docs/templates/manual-attach.md)'s lane.
 
 ## What you see
 
@@ -438,37 +457,36 @@ attach truth is recorded on Windows — no mac CI. The rendezvous steps are in
 
 ### The cross-repo pinning recipe
 
-Pinning a profile at user level means one file, read from every repo. What
-follows is a recorded live observation, audited on Windows at Zed 1.24.2 (no mac CI) — and where the observation left a step human-walkthrough-owed, the step appears as a marked gap below, never as
-an invented UI instruction.
+Pinning a profile at user level means one file, read from every repo. The
+behavior below was recorded live on Windows at Zed 1.24.2 — no mac CI.
 
-- **Cross-repo visibility (VERDICT-1).** Entries in the user-level
+- **Cross-repo visibility.** Entries in the user-level
   `debug.json` / `tasks.json` are visible from every repo: each project opens
   its own settings observer on the single user files, and the global map is
   appended to every scenario and task list.
-- **Collision (VERDICT-2).** Neither level replaces the other — same-label
+- **Collision.** Neither level replaces the other — same-label
   entries from user and project level COEXIST and both are listed. The project
   copy sorts first, and a label lookup resolves to the project copy; debug
   scenarios carry no dedup at all. A user-level entry is therefore safe to pin
   across repos, but a project entry with the same label shadows it
   positionally — to replace behavior wholesale, the labels must differ.
-- **Where the user-level files live on Windows (VERDICT-3).**
+- **Where the user-level files live on Windows.**
   `%APPDATA%\Zed\debug.json` and `%APPDATA%\Zed\tasks.json`. The tasks docs
   say the global `tasks.json` is "usually located in
   `~/.config/zed/tasks.json`" — on Windows that path is never read; the source
   resolves AppData, and the recipe follows the source (both cited in the probe
   note).
-- **Project-level locations (VERDICT-4).** Per worktree: `.zed/tasks.json`,
+- **Project-level locations.** Per worktree: `.zed/tasks.json`,
   `.vscode/tasks.json`, `.zed/debug.json`, `.vscode/launch.json`. A repo-root
   `debug.json` or `tasks.json` is not read. If a `.zed` dir contributes
   anything, that worktree's `.vscode` entries are suppressed, and project
   config files wait until the worktree is trusted.
-- **The modal gate (VERDICT-5).** A scenario is listed only if its DAP adapter
+- **The modal gate.** A scenario is listed only if its DAP adapter
   is installed — a user-level zatara profile shows up only in windows where the
   zatara extension is installed.
-- **"Pinned entry" (VERDICT-6).** 1.24.2's debugger UI has no pin feature; a
-  pinned entry is an entry pinned in the user-level config file — and per
-  VERDICT-1 those genuinely live across repos. The recency list is per-project
+- **"Pinned entry."** 1.24.2's debugger UI has no pin feature; a
+  pinned entry is an entry pinned in the user-level config file — and those
+  genuinely live across repos. The recency list is per-project
   and in memory, not cross-repo.
 
 One user-level pin for the pinned-program path — the same array shape, one more
@@ -485,25 +503,17 @@ element, in `%APPDATA%\Zed\debug.json` on Windows:
 }
 ```
 
-The live-UI half of this recipe was marked owed by the probe, then walked on
-live Zed 1.24.2 (Windows) with extension v0.1.3 on 2026-10-20 — the probe's
-own steps, not invented click paths:
+How the picker shows all of that, same Windows record:
 
-- confirmed live 2026-10-20: the picker lists the user profile and BOTH copies
-  of the collision twin, with the project copy rendered above the user copy —
-  the picker groups by source file: project block first, then user block
-- confirmed live 2026-10-20: a second window on another repo shows the user
-  profiles plus its own project profiles only — project entries do not cross
-  repos, user entries do
-- confirmed live 2026-10-20: the user global task lists in both repos while
-  each repo's own task lists only at home
-- measured 2026-10-20: the debug picker does NOT hot-reload a deleted or
-  edited `%APPDATA%\Zed\debug.json` — a running Zed keeps the old list, so
-  restart it after editing user-level files
+- The picker groups entries by source file — project block first, then user
+  block — so a collision twin lists BOTH copies, project copy above.
+- Project entries do not cross repos; user entries do.
+- A user-level task lists in every repo; a project task lists only at home.
+- The debug picker does NOT hot-reload a deleted or edited
+  `%APPDATA%\Zed\debug.json` — a running Zed keeps the old list, so restart it
+  after editing user-level files.
 
-The recipe's win-only parts — the AppData path and the probed picker — carry
-the same limitation stated everywhere in this section: recorded on Windows, no
-mac CI.
+The picker behavior above is recorded on Windows — no mac CI.
 
 ## Troubleshooting
 
@@ -514,7 +524,7 @@ mac CI.
 | "None of the locators for task … completed successfully" | The task is not a zatara gutter action: it needs `ZATARA_TEST_FILTER` with an exact `FullyQualifiedName=` filter — or, for a shipped "Run case" task, the substring form plus the `ZATARA_TEST_CASE=1` scope tag. (Where the test sits — the project folder or any folder inside it — the proxy's project search resolves the Debug lane's target itself.) |
 | Run prints MSB1003 or MSB1011 | A static Run task runs `dotnet test` against the repository root and lets dotnet find the project there (a solution, or exactly one project, subfolders included). A root that holds several projects with no solution is dotnet's ambiguity error to refuse — arm `ZATARA_FUZZY_MATCH=1` and the Debug lane will take the nearest solution instead, or add a solution at the root. The xunit case-row Run launcher is the exception: its proxy resolves the project first (the Debug lane's walk-up law) and declines honestly when it cannot. |
 | The session ends immediately with no test output | `ZATARA_RUNNER=0` is set (the runner is on by default since 2026-10-14) — remove it. |
-| The debug panel never says passed or failed | The run's report card is the **Console** tab: the vstest summary (`Passed! - Failed: 0, ...`) lands there when the session closes. Zed's debug panel carries no test-run state — that is an upstream gap (see [Upstream backlog](#upstream-backlog)), not something an extension can add. |
+| The debug panel never says passed or failed | The run's report card is the **Console** tab: the vstest summary (`Passed! - Failed: 0, ...`) lands there when the session closes. Zed's debug panel carries no test-run state — that is an upstream gap (see [Upstream gaps](#upstream-gaps)), not something an extension can add. |
 | Session runs but the release is unreachable (private repository — GitHub answers 404 to anonymous asset downloads — or offline) | Working as designed: the session runs from the settings override or the cached binaries, and Zed's log carries a `degraded session` note naming what went unverified. Nothing appears in the editor. If there is no proxy on disk at all the session cannot start — point `dap.zatara-netcoredbg.binary` at one, run one session while a release is reachable so the cache fills, or publish the releases anonymously. |
 | "test host did not pause within 30s" | The framework never parked a `testhost`. Confirm the target is a runnable test, or raise `ZATARA_RUNNER_BANNER_TIMEOUT_SECS`. |
 | macOS: netcoredbg not found | **Apple-silicon:** zatara downloads the official osx-arm64 build automatically — this message means the pinned release was unreachable and nothing was cached yet; install netcoredbg from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and keep it on `PATH`. **Intel:** upstream publishes no Intel macOS build and there is no Homebrew formula — build netcoredbg from source and put it on `PATH`. |
