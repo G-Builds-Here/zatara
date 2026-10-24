@@ -1,16 +1,5 @@
-//! DAP relay message structs — the bodies the proxy forwards across the
-//! process boundary without loss (LOC-0106 AC2).
-//!
-//! Every struct carries a flattened `extra` map: a field zatara-types has
-//! never seen must survive deserialize -> re-serialize byte-equivalent, so an
-//! adapter update can never break the relay (forward compatibility). The
-//! message envelope (`seq`/`type`/`command` routing) is LOC-0107's relay
-//! behavior; this crate defines the payload contracts only.
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-
-/// A DAP `Source`, as forwarded in breakpoint requests and output events.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
@@ -23,8 +12,6 @@ pub struct Source {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-/// One requested breakpoint (request side — a line the caller asks to bind).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceBreakpoint {
@@ -34,8 +21,6 @@ pub struct SourceBreakpoint {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-/// `arguments` of a `setBreakpoints` request.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBreakpointsArguments {
@@ -46,8 +31,6 @@ pub struct SetBreakpointsArguments {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-/// `body` of an `output` event — the stream Zed's Console tab renders.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputEventBody {
@@ -59,8 +42,6 @@ pub struct OutputEventBody {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-/// One bound breakpoint (response side — what the adapter verified).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Breakpoint {
@@ -74,8 +55,6 @@ pub struct Breakpoint {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-/// `body` of a `setBreakpoints` response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBreakpointsResponseBody {

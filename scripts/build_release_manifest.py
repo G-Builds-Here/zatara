@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Release manifest builder: hash every staged asset into manifest.json (AC2, LOC-0108).
 
 The release workflow stages one built artifact per target platform (the
@@ -25,8 +24,6 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-
-
 def sha256_of_file(path: Path) -> str:
     """Stream-hash a file so a large binary never has to sit fully in memory."""
     h = hashlib.sha256()
@@ -34,8 +31,6 @@ def sha256_of_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
 def build_manifest(assets_dir: Path, version: str, manifest_name: str) -> dict:
     """Return the manifest dict for every regular file in assets_dir, excluding
     the manifest file itself. Entries sorted by name for a deterministic order."""
@@ -50,8 +45,6 @@ def build_manifest(assets_dir: Path, version: str, manifest_name: str) -> dict:
         })
     entries.sort(key=lambda e: e["name"])
     return {"assets": entries}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets-dir", type=Path, required=True,
@@ -61,28 +54,20 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None,
                         help="Manifest path (default: <assets-dir>/manifest.json).")
     args = parser.parse_args()
-
     if not args.assets_dir.is_dir():
         sys.exit(f"MANIFEST BUILD FAILED: assets dir not found: {args.assets_dir}")
     if not args.version.strip():
         sys.exit("MANIFEST BUILD FAILED: --version must be a non-empty string")
-
     out_path = args.output or (args.assets_dir / "manifest.json")
     manifest = build_manifest(args.assets_dir, args.version, out_path.name)
-
     if not manifest["assets"]:
         sys.exit(f"MANIFEST BUILD FAILED: no assets staged in {args.assets_dir} "
                  f"(a release with zero assets is not publishable)")
-
-    # No timestamp, no run id -- the whole point of a pin set is that it
-    # re-runs to the identical bytes.
     serialized = json.dumps(manifest, indent=2, sort_keys=True,
                             ensure_ascii=True) + "\n"
     out_path.write_text(serialized, encoding="utf-8")
     print(f"manifest OK: {out_path} lists {len(manifest['assets'])} asset(s) "
           f"at version {args.version}")
     return 0
-
-
 if __name__ == "__main__":
     sys.exit(main())

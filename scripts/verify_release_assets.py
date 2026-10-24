@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Release download-and-verify guard: check served bytes against manifest.json (AC3, LOC-0108).
 
 This is the supply-chain integrity guard the CI download job runs (DR-4/DR-6).
@@ -30,8 +29,6 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-
-
 def sha256_of_file(path: Path) -> str:
     """Stream-hash a served file so a large binary never sits fully in memory."""
     h = hashlib.sha256()
@@ -39,8 +36,6 @@ def sha256_of_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
 def log_safe(value: object) -> str:
     """Render manifest-controlled text safe for the Actions log. The manifest
     is untrusted input to the verify job: a name (or hash) carrying newlines
@@ -49,8 +44,6 @@ def log_safe(value: object) -> str:
     printable ``\\xNN`` form; printable ASCII passes through untouched."""
     return "".join(ch if 32 <= ord(ch) < 127 else f"\\x{ord(ch):02x}"
                    for ch in str(value))
-
-
 def is_safe_asset_name(name: str) -> bool:
     """A release asset name must be a plain basename. The manifest is treated as
     untrusted input to the verify job, so a name that climbs out of the release
@@ -60,8 +53,6 @@ def is_safe_asset_name(name: str) -> bool:
     return (name not in ("", ".", "..")
             and "/" not in name and "\\" not in name
             and Path(name).name == name)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True,
@@ -69,18 +60,15 @@ def main() -> int:
     parser.add_argument("--assets-dir", type=Path, required=True,
                         help="Directory the release assets were downloaded into.")
     args = parser.parse_args()
-
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         sys.exit(f"VERIFY FAILED: cannot read manifest {args.manifest}: {exc}")
     if not args.assets_dir.is_dir():
         sys.exit(f"VERIFY FAILED: assets dir not found: {args.assets_dir}")
-
     assets = manifest.get("assets")
     if not assets:
         sys.exit(f"VERIFY FAILED: manifest {args.manifest} lists no assets")
-
     problems = []
     for entry in assets:
         name = entry.get("name")
@@ -94,10 +82,6 @@ def main() -> int:
                 f"no path separators or '..')")
             continue
         served = args.assets_dir / name
-        # is_file()/open FOLLOW symlinks: a listed name planted as a symlink
-        # would have the guard hash a file outside the release dir and score a
-        # true-hash match as a pass -- the false-green the name guard exists
-        # to prevent. A symlink is refused here, never hashed.
         if served.is_symlink():
             problems.append(
                 f"UNSAFE ASSET: {name} (symlink -- release assets must be "
@@ -110,19 +94,10 @@ def main() -> int:
         if actual != expected:
             problems.append(
                 f"CHECKSUM MISMATCH: {name}  expected {expected}  got {actual}")
-
-    # Two-way check: verification is meaningless if an unlisted file can ride
-    # along. An asset served but NOT named in the manifest is exactly as
-    # untrusted as a corrupt one -- dropping a manifest line and adding a
-    # planted asset must not verify green. The manifest file itself is exempt.
     listed_names = {entry.get("name") for entry in assets}
     served_names = {p.name for p in args.assets_dir.iterdir() if p.is_file()}
     for extra in sorted(served_names - listed_names - {args.manifest.name}):
         problems.append(f"UNLISTED ASSET: {extra} (served but not in manifest)")
-
-    # Sanitized at print time so every manifest- or filesystem-controlled
-    # string is covered -- raw newlines/ESC in a name must not forge lines in
-    # the Actions log (log injection).
     for problem in problems:
         print(log_safe(problem))
     if problems:
@@ -131,7 +106,5 @@ def main() -> int:
         return 1
     print(f"VERIFY OK: {len(assets)} asset(s) match manifest.json")
     return 0
-
-
 if __name__ == "__main__":
     sys.exit(main())

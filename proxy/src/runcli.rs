@@ -1,33 +1,10 @@
-//! The plain-Run lane (XUNIT-V3-MTP): `zatara-proxy run-case`.
-//!
-//! The generic per-arity Run templates point their command at this binary,
-//! so the Run lane's case filter is composed here — the same `build_filter`
-//! the debug lane rides, one grammar table for both lanes. Zed injects every
-//! match capture as `ZED_CUSTOM_csharp_*` env into the spawned task process
-//! (live-proven 2026-10-23, plain Run with no debug session), so the row's
-//! identity arrives through the environment: no task arguments, no shell
-//! quoting, no metachar risk.
-//!
-//! Decline-don't-guess: a missing capture, an unexpanded `${…}` marker
-//! (Zed did not substitute — a filter built from it would name nothing), or
-//! a missing working directory all end the run with a message and a failure
-//! code, never with a silently-wrong filter.
-
 use std::path::Path;
 use std::process::ExitCode;
-
 use zatara_types::LaunchConfig;
-
 use crate::discovery;
 use crate::mtp_case;
 use crate::runner;
-
-/// The capture env prefix Zed injects per gutter match.
 const CAPTURE_PREFIX: &str = "ZED_CUSTOM_csharp_";
-
-/// Build the numbered capture list `prefix{N}` (N = 1, 2, …) — stopped at
-/// the first gap, the same law as the locator's `env_list`. An unexpanded
-/// `${` marker is a decline, not a value.
 fn numbered(
     get: &dyn Fn(&str) -> Option<String>,
     prefix: &str,
@@ -46,10 +23,6 @@ fn numbered(
     }
     Ok(values)
 }
-
-/// The case-scope launch config the Run lane's environment names, pure over
-/// the env getter (the env-knob law: the knob logic never reads the real
-/// environment, so it tests without racing).
 fn case_config_from(
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Result<LaunchConfig, String> {
@@ -74,9 +47,6 @@ fn case_config_from(
         scope: Some("case".to_string()),
         framework: Some("xunit".to_string()),
         case_arguments,
-        // An unexpanded marker in ANY capture family declines the whole run:
-        // half a row's identity on the filter is exactly the silently-wrong
-        // filter class this lane exists to kill.
         method_parameters: numbered(get, &format!("{CAPTURE_PREFIX}method_param_"))?,
         case_raw_arguments: numbered(get, &format!("{CAPTURE_PREFIX}case_raw_"))?,
         ..Default::default()
@@ -84,14 +54,6 @@ fn case_config_from(
     runner::resolve_project_path(&mut config);
     Ok(config)
 }
-
-/// The `run-case` entry: compose the filter, run `dotnet test` in the
-/// gutter row's directory, stream stdio to the Run tab, pass the exit code
-/// through (Run-tab semantics unchanged: the task's result is dotnet's).
-///
-/// An MTP (xunit v3) project takes the row-id lane instead — the vstest
-/// `--filter` this argv speaks is silently dropped by the MTP runner (probe
-/// row 2), so the row resolves through discovery to its unique `-id`.
 pub fn run_from_env() -> ExitCode {
     let get = |key: &str| std::env::var(key).ok();
     let config = match case_config_from(&get) {
@@ -112,12 +74,6 @@ pub fn run_from_env() -> ExitCode {
         .status();
     child_exit(status, &program)
 }
-
-/// The v3 row-id Run lane: build (a plain Run has no build step of its own —
-/// unlike the debug lane, whose relay already built before dispatch), locate
-/// the built dll, resolve the clicked row to its unique case id, then run
-/// exactly that case. Decline-don't-guess still rules: a row that matches no
-/// case (or two) ends the run with the module's message, never a wider scope.
 fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
     let csproj = Path::new(&config.project_path);
     let build = std::process::Command::new("dotnet")
@@ -152,10 +108,6 @@ fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The resolved row rides the tab (owner live cycle 2026-10-24: the run
-    // was right — Total: 1, the clicked row — but nothing in the output said
-    // WHICH row it had run; the summary line alone cannot tell two sibling
-    // rows apart).
     eprintln!(
         "zatara: xunit v3 single case: {}",
         mtp_case::case_display_name(
@@ -171,10 +123,6 @@ fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
         .status();
     child_exit(status, "dotnet")
 }
-
-/// Run-tab exit law, shared by both lanes: success is success, a failing
-/// child forwards its own code when it fits a `u8` (Zed shows it as the task
-/// exit), and a spawn failure is a message plus the failure code.
 fn child_exit(status: std::io::Result<std::process::ExitStatus>, program: &str) -> ExitCode {
     match status {
         Ok(status) if status.success() => ExitCode::SUCCESS,
@@ -189,12 +137,10 @@ fn child_exit(status: std::io::Result<std::process::ExitStatus>, program: &str) 
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: BTreeMap<String, String> = pairs
             .iter()
@@ -202,7 +148,6 @@ mod tests {
             .collect();
         move |key: &str| map.get(key).map(|v| v.clone())
     }
-
     fn row() -> Vec<(&'static str, &'static str)> {
         vec![
             ("ZED_CUSTOM_csharp_namespace", "Shapes2"),
@@ -220,43 +165,28 @@ mod tests {
             ("ZED_CUSTOM_csharp_method_param_3", "flag"),
         ]
     }
-
     #[test]
     fn the_row_env_builds_the_case_wire_the_debug_lane_ships() {
-        // The Run lane's wire must equal what the locator emits for the same
-        // row: case scope, xunit, FQN from the captures, RAW list verbatim.
         let config = case_config_from(&env(&row())).expect("the row env names a case");
         assert_eq!(config.fully_qualified_name, "Shapes2.ShapeTests2.Mixed3");
         assert_eq!(config.scope.as_deref(), Some("case"));
         assert_eq!(config.framework.as_deref(), Some("xunit"));
         assert_eq!(config.case_raw_arguments, vec!["\"a\"", "1", "True"]);
-        // The project path is the cwd until discovery answers (the directory
-        // here does not exist, so the resolver keeps it — the same
-        // keep-what-you-cannot-prove law the debug lane follows).
         assert_eq!(config.project_path, "C:/work/xvcase");
-        // One filter, one table: the AND-substring law on the derived slots.
         assert_eq!(
             crate::runner::build_filter(&config),
             "FullyQualifiedName~Shapes2.ShapeTests2.Mixed3&DisplayName~a&DisplayName~n: 1&DisplayName~flag: True"
         );
     }
-
     #[test]
     fn an_unexpanded_capture_declines_the_run() {
-        // The hide-law guard in wire form: a `${…}` marker reaching this far
-        // means Zed never substituted it — a filter built on it names
-        // nothing, so the run declines with a message instead.
         let mut pairs = row();
         pairs[4] = ("ZED_CUSTOM_csharp_case_arg_1", "${ZED_CUSTOM_csharp_case_arg_1}");
         let err = case_config_from(&env(&pairs)).expect_err("an unexpanded capture is a decline");
         assert!(err.contains("unexpanded"), "got: {err}");
     }
-
     #[test]
     fn a_row_without_arguments_declines() {
-        // A method click rides the method template, never this lane; an
-        // argument-less case task names every row of the method — the
-        // silently-wrong filter class this epic kills.
         let pairs: Vec<(&str, &str)> = row()
             .into_iter()
             .filter(|(k, _)| !k.contains("case_") && !k.contains("method_param_"))
@@ -264,7 +194,6 @@ mod tests {
         let err = case_config_from(&env(&pairs)).expect_err("no args names no row");
         assert!(err.contains("case_arg"), "got: {err}");
     }
-
     #[test]
     fn a_missing_working_directory_declines() {
         let pairs: Vec<(&str, &str)> = row()

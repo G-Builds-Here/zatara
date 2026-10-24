@@ -5,69 +5,26 @@ edition = "2021"
 description = "stdio DAP proxy: answers Zed on stdin/stdout and relays to a netcoredbg child (DR-1 spike)"
 license = "MIT"
 publish = false
-
-# Native counterpart of the wasm extension (research findings §7b): full std
-# access, no wasm target. Dependency direction is preserved by importing only
-# zatara-types — never the zatara extension crate. (The lone dev-dependency
-# on zatara-e2e below is test-only and one-directional: it shares the
-# flow-order definition, not production code.)
 [dependencies]
-# Pure-Rust gzip (default backend) for the tar.gz asset lane — the linux
-# matrix's netcoredbg asset is an archive (LOC-0115 AC2); a C zlib would
-# drag the very toolchain problem (dlltool on gnu hosts) this workspace
-# already routes around.
 flate2 = "1"
-# zip parsing for the Windows asset lane (live repro, owner 2026-10-13: the
-# staged netcoredbg-win64.zip must be unpacked before spawn — see asset.rs).
-# An untrusted container is not hand-rolled: the tar walk above stayed
-# hand-written only because gzip cost no parser, and a zip central directory
-# is not that bargain. default-features off keeps the pure-Rust flate2
-# backend — a C zlib would drag back the very toolchain problem (dlltool on
-# gnu hosts) this workspace already routes around.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 portable-pty = "0.9"
 serde_json = "1"
 zatara-types = { path = "../zatara-types" }
-
-# Unix process liveness for the attach target (AC3). Windows needs no crate
-# for it: kernel32 is bound by a hand-written extern block in runner.rs, so
-# the GNU-host toolchains never need dlltool-generated import libraries.
-# Regular dependencies reach test targets too, so the integration suite's own
-# probe builds from this entry — no dev-dependency needed.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-# (Publish mirror: the dev repo's zatara-e2e dev-dependency and tests/ are
-# test-only and stripped from this public copy by the publish-sync script.
-# Source of truth: zatara-netcoredbg/crates/zatara-proxy.)
-
 [features]
-# Scripted stand-in adapter driven by the integration suite. The bin below is
-# required-features-gated, so shipping builds (`cargo build`, no features)
-# never contain or ship the fake.
 test-fake-adapter = []
-
 [[bin]]
 name = "zatara-proxy"
 path = "src/main.rs"
-
-# Console-subsystem counterpart of the GUI-subsystem proxy's `run-case`
-# branch. A console child inherits the Zed task's pseudo-terminal and its
-# live stdout renders there (the GUI proxy's does not — G2 live cycle
-# 2026-10-23), so the launcher runs this when present and the Run tab
-# streams the test output live with dotnet's verdict color intact. Same
-# `run_case()` code path, chosen by subsystem, not by argv.
 [[bin]]
 name = "zatara-run-case"
 path = "src/bin/run_case.rs"
-
 [[bin]]
 name = "zatara-fake-adapter"
 path = "src/bin/fake_adapter.rs"
 required-features = ["test-fake-adapter"]
-
-# Scripted stand-in for the dotnet CLI, placed on PATH by the runner's
-# integration tests (same required-features gate: never in shipping builds).
 [[bin]]
 name = "zatara-fake-dotnet"
 path = "src/bin/fake_dotnet.rs"

@@ -5,50 +5,22 @@ edition = "2021"
 description = "Zed extension for .NET gutter test run/debug via a netcoredbg DAP proxy"
 license = "MIT"
 publish = false
-
-# Publish mirror of the dev workspace (zatara-netcoredbg): this root crate is
-# the Zed extension, zatara-types is the shared contract, proxy is the DAP
-# relay shipped as release binaries. Tests/fixtures/e2e stay in the dev repo.
 [workspace]
 resolver = "2"
 members = ["zatara-types", "proxy"]
-
 [lib]
-# rlib alongside the wasm cdylib: Zed's own extension convention, and what
-# lets `cargo test` link the crate for the host acceptance suites.
 crate-type = ["cdylib", "rlib"]
-
-# The wasm crate is thin glue only (DR-7): locator, config translation, binary
-# resolution land in later stories. The dependency is carried from the scaffold
-# so CI proves the real extension dependency builds for wasm32-wasip2 on both
-# runner OSes, not just an empty cdylib.
 [dependencies]
 zed_extension_api = "0.7.0"
-# Single-definition proof (LOC-0106): the extension consumes the shared
-# contract types; it never carries a local copy.
 zatara-types = { path = "zatara-types" }
-# BinaryManager (LOC-0110): manifest parse + SHA256 verify. Pure-Rust crates
-# only — this crate must keep compiling for wasm32-wasip2 (build-wasm job).
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
 [dev-dependencies]
-# The acceptance tests hash their own fixtures to assert the manager reports
-# the *computed* digest, not just a constant echoed from the manifest.
 sha2 = "0.10"
 serde_json = "1"
-# Integration suites construct real API request/response types (scenario
-# emission, adapter spec) exactly as the Zed host hands them to the extension.
 zed_extension_api = "0.7.0"
-# The work-dir handoff test asserts against the shared contract const the
-# proxy reads — one definition, so a rename on one side cannot pass silently
-# on the other (SCHEMA_EQ law, same as LaunchConfig).
 zatara-types = { path = "zatara-types" }
-# runnables_queries: compile the shipped C# query with the same grammar family
-# Zed loads (tree-sitter 0.25 / c-sharp 0.23 — the versions the 2026-10-21
-# offline probe reproduced Zed's Impossible-pattern failure with). Dev-only:
-# the wasm cdylib never sees these; Zed builds the extension, cargo test does not.
 tree-sitter = "0.25"
 tree-sitter-c-sharp = "0.23"
 streaming-iterator = "0.1"
