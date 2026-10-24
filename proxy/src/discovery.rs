@@ -47,11 +47,20 @@ pub enum Resolution {
     /// Two or more Exe projects with nothing deciding between them —
     /// csproj candidates in sorted order, no dll chosen (LOC-0129 turns
     /// this into an error naming the candidates; the fix is a solution
-    /// file or a pinned `program`, never a guess here).
+    /// file or a pinned `program`, never a guess here). Test-shaped Exes
+    /// never appear here — [`resolve`] excludes them before the count,
+    /// so ambiguity is app-vs-app only.
     Multiple(Vec<PathBuf>),
     /// Scanned `root` and found nothing runnable — names the root that
     /// was scanned.
     NotFound { root: PathBuf },
+    /// Every runnable (Exe) project under `root` is test-shaped — an
+    /// xunit v3 / MTP repo whose Exes run tests, not an app. Program
+    /// debug has no app to launch; the gutter test lanes do (the xunit
+    /// v3 MTP lane launches these very projects filtered). The candidates
+    /// are named verbatim, exclusion surfaced not hidden (owner ruling
+    /// 2026-10-20: exclusion first, the honest refusal only after).
+    TestOnly { root: PathBuf, tests: Vec<PathBuf> },
 }
 
 /// The project-set contract is broken: discovery ran but the repo is not
@@ -131,11 +140,29 @@ pub fn resolve(root: &Path) -> Result<Resolution, DiscoveryError> {
         Some(solution) => referenced_projects(&solution)?,
         None => scan_csproj(root),
     };
-    let mut exes: Vec<PathBuf> = projects
-        .into_iter()
-        .filter(|csproj| target_type_is_exe(csproj))
-        .collect();
+    // The runnable set is the Exes that are not test-shaped. A test-shaped
+    // Exe — an xunit v3 / MTP project declares OutputType=Exe because its
+    // test run IS the program (probe 2026-10-20, fixtures/breadth/XunitV3Fx)
+    // — is an app candidate for exactly nothing: program debug launches an
+    // app, and the test lanes reach these projects through the gutter
+    // instead. Exclusion only ever REMOVES candidates, never adds one, so
+    // a repo that used to resolve still resolves the same way; what changes
+    // is that a test Exe no longer competes with (or fabricates ambiguity
+    // against) the app next to it.
+    let mut exes: Vec<PathBuf> = Vec::new();
+    let mut tests: Vec<PathBuf> = Vec::new();
+    for csproj in projects {
+        if !target_type_is_exe(&csproj) {
+            continue;
+        }
+        if test_project_shape(&csproj) {
+            tests.push(csproj);
+        } else {
+            exes.push(csproj);
+        }
+    }
     exes.sort();
+    tests.sort();
     match exes.len() {
         1 => {
             let csproj = exes.into_iter().next().expect("one exe");
@@ -147,6 +174,14 @@ pub fn resolve(root: &Path) -> Result<Resolution, DiscoveryError> {
                 profile,
             }))
         }
+        // Nothing app-shaped, but the repo does hold runnable test Exes.
+        // NotFound would pretend they were never there (owner ruling
+        // 2026-10-20); this outcome names them and points at the lane that
+        // runs them.
+        0 if !tests.is_empty() => Ok(Resolution::TestOnly {
+            root: root.to_path_buf(),
+            tests,
+        }),
         0 => Ok(Resolution::NotFound {
             root: root.to_path_buf(),
         }),
@@ -309,10 +344,15 @@ fn scan_csproj_into(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 /// The TargetType=Exe filter: an MSBuild `<TargetType>` element whose
-/// value is `Exe`. Libraries, test projects, and content carry no such
-/// element (or a different value) and never enter the candidate set.
-/// The scan is hand-written — this repo carries no XML parser and needs
-/// one property, not a DOM.
+/// value is `Exe`. Libraries and content carry no such element (or a
+/// different value) and never enter the candidate set. The scan is
+/// hand-written — this repo carries no XML parser and needs one property,
+/// not a DOM.
+/// The claim this filter once made — that TEST projects carry no such
+/// element — died with xunit v3 (probe 2026-10-20): an MTP test project
+/// declares `Exe` on purpose, its test run is the program. What separates
+/// those Exes from apps is not the type but the test shape
+/// ([`test_project_shape`]), and [`resolve`] excludes on that.
 /// Whether a csproj names a runnable app, by MSBuild's own law
 /// (live defect 2026-10-16, eCommerce_Project): an explicit type wins —
 /// modern SDK-style projects spell it `<OutputType>` (the legacy
@@ -363,6 +403,114 @@ fn sdk_is_web(raw: &str) -> bool {
     false
 }
 
+/// Whether a csproj declares itself a TEST project, read by the same
+/// hand-written scan as the Exe filter. Three signals, any one decisive:
+/// a `PackageReference` to a known test framework or test platform, an
+/// `IsTestProject=true` property, or `TestingPlatformDotnetTestSupport=true`.
+/// Deliberately BROAD — its only consumer is [`resolve`]'s exclusion of
+/// Exes from the program-door candidate set, and exclusion can only ever
+/// remove a candidate. The process-launching trigger is the narrow
+/// [`mtp_test_project`].
+pub(crate) fn test_project_shape(csproj: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(csproj) else {
+        return false;
+    };
+    test_shape_in(&raw)
+}
+
+/// The property and package rules of [`test_project_shape`], pure over
+/// file text so the whole table is testable without a filesystem.
+fn test_shape_in(raw: &str) -> bool {
+    if truthy_property(raw, "IsTestProject")
+        || truthy_property(raw, "TestingPlatformDotnetTestSupport")
+    {
+        return true;
+    }
+    const TEST_PACKAGE_PREFIXES: [&str; 6] = [
+        "xunit",
+        "nunit",
+        "mstest",
+        "tunit",
+        "microsoft.testing.platform",
+        "microsoft.net.test.sdk",
+    ];
+    package_references(raw).iter().any(|name| {
+        let name = name.to_ascii_lowercase();
+        TEST_PACKAGE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    })
+}
+
+/// The xunit v3 / MTP lane's trigger: this Exe IS the test program.
+/// Narrow on purpose — the runner hands this path to the debugger as a
+/// launch, so it fires only where the direct-execution filter grammar
+/// (`-method`/`-class`/`-namespace`, probe rows 6-8) is the runner's own:
+/// an `xunit.v3*` or `Microsoft.Testing.Platform*` package, or the
+/// testing-platform `dotnet test` switch, on an Exe.
+pub(crate) fn mtp_test_project(csproj: &Path) -> bool {
+    if !target_type_is_exe(csproj) {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(csproj) else {
+        return false;
+    };
+    mtp_shape_in(&raw)
+}
+
+/// The package and property rules of [`mtp_test_project`], pure over file
+/// text. A plain v2 `xunit` package or a vstest-only `Microsoft.NET.Test.Sdk`
+/// answers false — those projects are Libraries whose tests run inside
+/// `dotnet test`'s host, and the attach lane is still their lane.
+fn mtp_shape_in(raw: &str) -> bool {
+    if truthy_property(raw, "TestingPlatformDotnetTestSupport") {
+        return true;
+    }
+    package_references(raw).iter().any(|name| {
+        let name = name.to_ascii_lowercase();
+        name.starts_with("xunit.v3") || name.starts_with("microsoft.testing.platform")
+    })
+}
+
+/// Property truthiness under MSBuild's own evaluation: the last
+/// declaration wins, compared case-insensitively against `true`.
+fn truthy_property(raw: &str, tag: &str) -> bool {
+    tag_values(raw, tag)
+        .into_iter()
+        .last()
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Every `PackageReference` element's `Include` value, in document order.
+/// The attribute walk mirrors [`sdk_is_web`]'s: hand-written, and the
+/// quote is spelled `\u{22}` so this file keeps its raw-quote parity
+/// (docs_setting_drift harvests on raw quote bytes — see the note beside
+/// the sln field walker).
+fn package_references(raw: &str) -> Vec<String> {
+    const OPEN: &str = "<PackageReference";
+    // concat keeps the file's raw-quote parity: the attribute's opening
+    // quote rides as a `\u{22}` escape (zero raw bytes), never as a third
+    // bare quote byte inside one literal (the `sdk_is_web` law, in one place).
+    const ATTR: &str = concat!("Include=", "\u{22}");
+    let mut names = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        // The element body ends at the next `>`; an Include found past it
+        // belongs to some other element (a ProjectReference's Include is
+        // not a package).
+        let body_end = rest.find('>').unwrap_or(rest.len());
+        let body = &rest[..body_end];
+        let Some(attr) = body.find(ATTR) else { continue };
+        let value_start = attr + ATTR.len();
+        let Some(end) = body[value_start..].find('\u{22}') else {
+            continue;
+        };
+        names.push(body[value_start..value_start + end].to_string());
+    }
+    names
+}
+
 /// Every element body for `tag` in an MSBuild file, in document order —
 /// a property may appear in more than one PropertyGroup and every
 /// occurrence counts.
@@ -386,7 +534,11 @@ fn tag_values(raw: &str, tag: &str) -> Vec<String> {
 /// the project directory, named by `<AssemblyName>` or the csproj stem.
 /// A missing dll is an error naming the expected path — discovery does
 /// not build (DR-2) and does not pretend otherwise.
-fn locate_built_dll(csproj: &Path) -> Result<PathBuf, DiscoveryError> {
+/// `pub(crate)`: the runner's xunit v3 / MTP debug lane names the built
+/// test dll the same way the door names an app dll (same drop location,
+/// same AssemblyName-or-stem rule) after its own build step has put it
+/// there.
+pub(crate) fn locate_built_dll(csproj: &Path) -> Result<PathBuf, DiscoveryError> {
     let raw = std::fs::read_to_string(csproj).unwrap_or_default();
     let dir = csproj.parent().expect("csproj file has a parent");
     let stem = csproj.file_stem().expect("csproj file has a stem");
@@ -542,5 +694,105 @@ mod tests {
     #[test]
     fn a_file_without_a_profiles_object_has_no_first_profile() {
         assert_eq!(first_profile_name(r#"{ "iisSettings": {} }"#), None);
+    }
+
+    // ---------------- test-shape detection (xunit v3 / MTP, 2026-10-20)
+
+    /// The v3 fixture's own csproj shape (fixtures/breadth/XunitV3Fx):
+    /// an Exe carrying `xunit.v3` and the testing-platform switch is a
+    /// test project by declaration. This is the file that used to read as
+    /// an app to the door.
+    #[test]
+    fn a_v3_project_declaring_xunit_v3_and_the_platform_switch_is_test_shaped() {
+        let raw = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+                   <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>\
+                   <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>\
+                   </PropertyGroup><ItemGroup>\
+                   <PackageReference Include=\"xunit.v3\" Version=\"3.2.2\" />\
+                   </ItemGroup></Project>";
+        assert!(test_shape_in(raw));
+        assert!(mtp_shape_in(raw), "the same file is the MTP lane's shape");
+    }
+
+    /// The v2 shape (fixtures/dotnet/Basic): `xunit` plus the vstest SDK.
+    /// Test-shaped for the door's exclusion, but NOT the MTP lane — its
+    /// tests run inside `dotnet test`'s host and the attach lane stands.
+    #[test]
+    fn a_v2_test_project_is_test_shaped_but_never_the_mtp_lane() {
+        let raw = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+                   <TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup>\
+                   <PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.8.0\" />\
+                   <PackageReference Include=\"xunit\" Version=\"2.6.6\" />\
+                   <PackageReference Include=\"xunit.runner.visualstudio\" Version=\"2.5.6\" />\
+                   </ItemGroup></Project>";
+        assert!(test_shape_in(raw));
+        assert!(
+            !mtp_shape_in(raw),
+            "v2 packages alone must not route a launch to the MTP lane"
+        );
+    }
+
+    /// The property spellings act alone: a project naming itself
+    /// `IsTestProject` (or the platform switch) needs no package line —
+    /// references can ride a `Directory.Build.props` the scan never reads.
+    #[test]
+    fn a_test_project_property_act_is_decisive_without_any_package() {
+        assert!(test_shape_in(
+            "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>"
+        ));
+        assert!(
+            test_shape_in(
+                "<Project><PropertyGroup><IsTestProject>True</IsTestProject></PropertyGroup></Project>"
+            ),
+            "truthiness is case-insensitive"
+        );
+        assert!(mtp_shape_in(
+            "<Project><PropertyGroup><TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport></PropertyGroup></Project>"
+        ));
+    }
+
+    /// Exclusion's safety law in one line: an app is not test-shaped. An
+    /// ordinary app with ordinary packages answers false on both rules,
+    /// so the door's candidate set loses nothing it should keep.
+    #[test]
+    fn a_plain_app_is_test_shaped_by_nothing() {
+        let raw = "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup>\
+                   <TargetFramework>net9.0</TargetFramework></PropertyGroup><ItemGroup>\
+                   <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\
+                   <ProjectReference Include=\"..\\Lib\\Lib.csproj\" />\
+                   </ItemGroup></Project>";
+        assert!(!test_shape_in(raw));
+        assert!(!mtp_shape_in(raw));
+    }
+
+    /// The walker reads only `PackageReference` Includes — a
+    /// `ProjectReference` beside it must not be mistaken for a package
+    /// (a project literally named `xunit.tests.csproj` is not xunit).
+    #[test]
+    fn the_package_walker_takes_package_includes_and_nothers() {
+        let raw = "<ItemGroup>\
+                   <PackageReference Include=\"NUnit\" Version=\"4.0.0\" />\
+                   <ProjectReference Include=\"..\\xunit\\xunit.csproj\" />\
+                   <Reference Include=\"Microsoft.Testing.Platform\" />\
+                   <PackageReference Include='tunit'><Version>1.0</Version></PackageReference>\
+                   </ItemGroup>";
+        // Only the double-quoted attribute is read — the shape every
+        // template and VS writes. A single-quoted Include (legal XML,
+        // never emitted by .NET tooling) is missed here, and a miss on
+        // this walker can only preserve the pre-exclusion behavior: the
+        // walker's sole consumers remove candidates, never add them.
+        assert_eq!(package_references(raw), vec!["NUnit"]);
+    }
+
+    /// The last declaration wins, as MSBuild evaluates: a project that
+    /// turns `IsTestProject` back off after some props turned it on is
+    /// not test-shaped by that property (a package signal may still say
+    /// otherwise — this pins only the property's own evaluation).
+    #[test]
+    fn the_last_property_declaration_wins() {
+        let raw = "<Project><PropertyGroup><IsTestProject>true</IsTestProject>\
+                   </PropertyGroup><PropertyGroup><IsTestProject>false</IsTestProject>\
+                   </PropertyGroup></Project>";
+        assert!(!test_shape_in(raw));
     }
 }

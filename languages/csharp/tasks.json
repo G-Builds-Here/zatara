@@ -6,7 +6,10 @@
       "test",
       "\"$ZED_WORKTREE_ROOT\"",
       "--filter",
-      "\"FullyQualifiedName=${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\""
+      "\"FullyQualifiedName=${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\"",
+      "--",
+      "--filter-method",
+      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\""
     ],
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
@@ -26,12 +29,20 @@
       "test",
       "\"$ZED_WORKTREE_ROOT\"",
       "--filter",
-      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&FullyQualifiedName~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}\""
+      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}& FullyQualifiedName~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}\"",
+      "--",
+      "--filter-method",
+      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\""
     ],
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
-      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&FullyQualifiedName~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}"
+      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}& FullyQualifiedName~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}",
+      "ZATARA_TEST_CASE": "1",
+      "ZATARA_TEST_FRAMEWORK": "nunit",
+      "ZATARA_CASE_ARG_1": "${ZED_CUSTOM_csharp_case_arg_1}",
+      "ZATARA_CASE_ARG_2": "${ZED_CUSTOM_csharp_case_arg_2}",
+      "ZATARA_CASE_ARG_3": "${ZED_CUSTOM_csharp_case_arg_3}"
     },
     "tags": ["csharp-test-case-nunit"],
     "use_new_terminal": false,
@@ -46,12 +57,20 @@
       "test",
       "\"$ZED_WORKTREE_ROOT\"",
       "--filter",
-      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&Name~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}\""
+      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}& Name~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}\"",
+      "--",
+      "--filter-method",
+      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\""
     ],
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
-      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&Name~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}"
+      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}& Name~${ZED_CUSTOM_csharp_case_arg_1},${ZED_CUSTOM_csharp_case_arg_2},${ZED_CUSTOM_csharp_case_arg_3}",
+      "ZATARA_TEST_CASE": "1",
+      "ZATARA_TEST_FRAMEWORK": "mstest",
+      "ZATARA_CASE_ARG_1": "${ZED_CUSTOM_csharp_case_arg_1}",
+      "ZATARA_CASE_ARG_2": "${ZED_CUSTOM_csharp_case_arg_2}",
+      "ZATARA_CASE_ARG_3": "${ZED_CUSTOM_csharp_case_arg_3}"
     },
     "tags": ["csharp-test-case-mstest"],
     "use_new_terminal": false,
@@ -60,20 +79,66 @@
     "show_summary": false
   },
   {
-    "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_case_arg_2}, ${ZED_CUSTOM_csharp_case_arg_3})",
-    "command": "dotnet",
-    "args": [
-      "test",
-      "\"$ZED_WORKTREE_ROOT\"",
-      "--filter",
-      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&DisplayName~${ZED_CUSTOM_csharp_method_param_1}: ${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_method_param_2}: ${ZED_CUSTOM_csharp_case_arg_2}, ${ZED_CUSTOM_csharp_method_param_3}: ${ZED_CUSTOM_csharp_case_arg_3}\""
-    ],
+    "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1})",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
-      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}&DisplayName~${ZED_CUSTOM_csharp_method_param_1}: ${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_method_param_2}: ${ZED_CUSTOM_csharp_case_arg_2}, ${ZED_CUSTOM_csharp_method_param_3}: ${ZED_CUSTOM_csharp_case_arg_3}"
+      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}",
+      "ZATARA_TEST_CASE": "1",
+      "ZATARA_TEST_FRAMEWORK": "xunit",
+      "ZATARA_CASE_ARG_1": "${ZED_CUSTOM_csharp_case_arg_1}",
+      "ZATARA_CASE_RAW_1": "${ZED_CUSTOM_csharp_case_raw_1}",
+      "ZATARA_CASE_PARAM_1": "${ZED_CUSTOM_csharp_method_param_1}"
     },
-    "tags": ["csharp-test-case-xunit"],
+    "tags": ["csharp-test-case-generic-1"],
+    "use_new_terminal": false,
+    "reveal": "always",
+    "show_command": false,
+    "show_summary": false
+  },
+  {
+    "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_case_arg_2})",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "DOTNET_FILE": "$ZED_FILE",
+      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}",
+      "ZATARA_TEST_CASE": "1",
+      "ZATARA_TEST_FRAMEWORK": "xunit",
+      "ZATARA_CASE_ARG_1": "${ZED_CUSTOM_csharp_case_arg_1}",
+      "ZATARA_CASE_ARG_2": "${ZED_CUSTOM_csharp_case_arg_2}",
+      "ZATARA_CASE_RAW_1": "${ZED_CUSTOM_csharp_case_raw_1}",
+      "ZATARA_CASE_RAW_2": "${ZED_CUSTOM_csharp_case_raw_2}",
+      "ZATARA_CASE_PARAM_1": "${ZED_CUSTOM_csharp_method_param_1}",
+      "ZATARA_CASE_PARAM_2": "${ZED_CUSTOM_csharp_method_param_2}"
+    },
+    "tags": ["csharp-test-case-generic-2"],
+    "use_new_terminal": false,
+    "reveal": "always",
+    "show_command": false,
+    "show_summary": false
+  },
+  {
+    "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_case_arg_2}, ${ZED_CUSTOM_csharp_case_arg_3})",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "DOTNET_FILE": "$ZED_FILE",
+      "ZATARA_TEST_FILTER": "FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}",
+      "ZATARA_TEST_CASE": "1",
+      "ZATARA_TEST_FRAMEWORK": "xunit",
+      "ZATARA_CASE_ARG_1": "${ZED_CUSTOM_csharp_case_arg_1}",
+      "ZATARA_CASE_ARG_2": "${ZED_CUSTOM_csharp_case_arg_2}",
+      "ZATARA_CASE_ARG_3": "${ZED_CUSTOM_csharp_case_arg_3}",
+      "ZATARA_CASE_RAW_1": "${ZED_CUSTOM_csharp_case_raw_1}",
+      "ZATARA_CASE_RAW_2": "${ZED_CUSTOM_csharp_case_raw_2}",
+      "ZATARA_CASE_RAW_3": "${ZED_CUSTOM_csharp_case_raw_3}",
+      "ZATARA_CASE_PARAM_1": "${ZED_CUSTOM_csharp_method_param_1}",
+      "ZATARA_CASE_PARAM_2": "${ZED_CUSTOM_csharp_method_param_2}",
+      "ZATARA_CASE_PARAM_3": "${ZED_CUSTOM_csharp_method_param_3}"
+    },
+    "tags": ["csharp-test-case-generic-3"],
     "use_new_terminal": false,
     "reveal": "always",
     "show_command": false,
@@ -86,7 +151,10 @@
       "test",
       "\"$ZED_WORKTREE_ROOT\"",
       "--filter",
-      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.\""
+      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.\"",
+      "--",
+      "--filter-class",
+      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}\""
     ],
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {

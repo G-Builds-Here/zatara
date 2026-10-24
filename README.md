@@ -6,7 +6,7 @@ Run and debug .NET unit tests from the Zed editor gutter, powered by
 This README is the user's surface: what you need, how to install, how to use
 it, what you can configure, and what to do when a symptom appears. The internal
 design, the project's maturity ledger, and the development workflow live in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md).
 
 ## Requirements
 
@@ -15,7 +15,7 @@ design, the project's maturity ledger, and the development workflow live in
 | Zed | A build whose extension API is `zed_extension_api` 0.7 |
 | .NET SDK | `dotnet` reachable on the PATH the adapter inherits |
 | netcoredbg | **Windows / Linux / Apple-silicon macOS:** official [Samsung/netcoredbg](https://github.com/Samsung/netcoredbg) releases, fetched automatically and SHA256-verified against the version-pinned release manifest. **Intel macOS:** upstream publishes no Intel macOS build and no Homebrew formula exists — install netcoredbg manually from the releases page (Apple-silicon asset or source build) and keep it on `PATH` (see [Troubleshooting](#troubleshooting)). |
-| A test project | xunit, nunit, or mstest. The Debug lane finds the project by walking up from the test file's directory until a folder names exactly one project; the Run lane points `dotnet` at the repository root and lets its own solution-or-unique-project rules answer. An ambiguous folder stays dotnet's honest refusal, never a guess — `ZATARA_FUZZY_MATCH=1` lets the Debug lane take the nearest solution instead. |
+| A test project | xunit, nunit, or mstest. The Debug lane finds the project by walking up from the test file's directory until a folder names exactly one project; static Run tasks point `dotnet` at the repository root and let its own solution-or-unique-project rules answer, while the xunit case-row Run launcher resolves the project proxy-side under the same walk-up law. An ambiguous folder stays dotnet's honest refusal, never a guess — `ZATARA_FUZZY_MATCH=1` lets the Debug lane take the nearest solution instead. |
 
 ## Install
 
@@ -70,13 +70,57 @@ the suites exercise.
    that is the framework calling your test, not a bug in this extension. Press
    Continue.
 
-The debug path answers only an exact-FQN filter (`ZATARA_TEST_FILTER` set to
-`FullyQualifiedName=` plus one full name), and it declines a substring filter
-(`FullyQualifiedName~`) on purpose — that is how a debug session silently ends up
-attached to the wrong set of tests. The no-debugger **Run** lane is a different
-matter and legitimately selects a set: `crates/zatara/languages/csharp/tasks.json` ships substring
-filters for its "Run class" and "Run case" actions, and exact FQNs for a single
-method.
+The debug path answers an exact-FQN filter (`ZATARA_TEST_FILTER` set to
+`FullyQualifiedName=` plus one full name), and it answers a substring filter
+(`FullyQualifiedName~`) only when the same task carries the explicit
+`ZATARA_TEST_CASE=1` scope tag and the task's numbered case-argument envs — the
+shipped "Run case" tasks do, and the proxy rebuilds the row predicate from the
+captured arguments rather than trusting the filter text. A substring filter
+without the tag is still declined on purpose — that is how a debug session
+silently ends up attached to the wrong set of tests. The no-debugger **Run**
+lane is a different matter and legitimately selects a set.
+`crates/zatara/languages/csharp/tasks.json` ships static substring
+filters for its "Run class" action and its nunit/mstest "Run case" actions, and
+exact FQNs for a single method. An xunit `[InlineData]` row Run rides a
+per-arity generic task instead: its command is the package-root launcher
+(`run-case.cmd`), which resolves the shipped proxy and the console helper
+(`zatara-run-case.exe`) beside it. The row's identity travels through the
+injected `ZED_CUSTOM_csharp_*` capture env with zero argv, so no shell
+metacharacter can reach the composed line, and the same AND-substring filter
+the debug lane composes is composed here. The test run's exit code reaches the
+Run tab unchanged. The launcher is a CRLF batch file (cmd.exe silently
+abandons an LF-only batch block). It runs the console-subsystem helper when
+present — its output then streams into the Run tab as it happens, dotnet's
+verdict color included (live-proven 2026-10-24) — and otherwise keeps the
+buffered hop: the proxy is a GUI-subsystem binary and cannot stream live
+through Zed's task pseudo-terminal, so its stream is captured to a temp file
+and typed back. Plain-pipe shells prove the law is the terminal, not the run. `[MemberData]`/`[ClassData]` theories run from the test method's own
+gutter icon — the whole theory, every row. The data definitions themselves
+(an `IEnumerable<object[]>`/`TheoryData` method, field, or sibling class)
+carry no gutter icons: owner ruling 2026-10-21. An icon riding a row inside
+the data object reads as "run this test with this row" from a place that is
+not the test, and a per-row option on the theory itself cannot exist — Zed
+resolves one task per gutter position (same position + same tag keeps only
+the last match). Targeting one member-data row remains the
+[manual-attach template](docs/templates/manual-attach.md)'s lane.
+An `[InlineData]` row that contains strings carries case icons too, filtered by
+the AND-substring law: every slot contributes one `&`-joined substring part — a
+string slot its bare content, a primitive slot `param: value`. The two measured
+boundaries (2026-10-21): content matches as a substring, so a row's filter also
+selects a row whose string merely contains it (`("a",1,true)` also runs
+`("ab",1,true)` when both exist); and quotes never survive the filter transport,
+so the exact display name `dotnet test --list-tests` prints (`s: "a"`) matches
+zero tests — the bare content is all a filter can ever ship.
+An xunit v3 (Microsoft Testing Platform) project picks that same row a
+different way: its runner cannot filter by arguments at all, so a v3 row click
+asks the built test program which rows it has, finds the clicked row among
+them, and runs just that one. A v3 plain Run therefore builds first and pays
+one short listing pass, and the Run tab names the row it ran. Rows whose
+runner name cannot be rebuilt from the source text — custom display names,
+enum expressions like flag combinations or casts — decline with a message
+pointing at the method's gutter arrow instead of silently running a wider set.
+(The match mechanics and the measurements behind them live with the code —
+`mtp_case` in the proxy and the v3 probe doc in the dev repository.)
 
 ## What you see
 
@@ -109,7 +153,7 @@ The gutter and panel layout, schematically:
 ```
 
 A recorded GIF of a live editor session belongs here once the editor wiring in
-[Status](CONTRIBUTING.md#status) lands. Until then, both halves of the picture above are
+[Status](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md#status) lands. Until then, both halves of the picture above are
 derived from checks you can run, not from a description:
 
 - **Which gutter icons appear, and the exact filter each click emits**, are
@@ -177,9 +221,10 @@ starts from (a shell profile, or launching Zed from a terminal).
 |------|---------|--------|
 | `ZATARA_RUNNER` | **on** | The in-proxy runner (build, paused test, attach) is ON by default — it is the only mode with unit-test support. Set `0` to opt out into the plain-relay dev seam (launch passed straight to netcoredbg). Any other value, including unset, stays on. |
 | `ZATARA_RUNNER_BANNER_TIMEOUT_SECS` | 30 | How long the runner waits for the vstest pause banner before giving up. Raise it on a machine where the first test host is slow to start. |
-| `ZATARA_FUZZY_MATCH` | off | Debug lane only. When the project search cannot decide — a folder naming several projects with no name match, or no ancestor folder naming one project at all — the nearest `.sln` going up answers instead: `dotnet test` builds the solution and your filter selects the tests. Set `1` to arm; two solutions in one folder stay dotnet's ambiguity error, and a provable answer always beats the fallback. The **Run lane** is a static task and cannot consult this: Zed has no per-OS task command, so Run points `dotnet test` at the repository root and trusts dotnet's own root resolution. |
+| `ZATARA_FUZZY_MATCH` | off | Debug lane only. When the project search cannot decide — a folder naming several projects with no name match, or no ancestor folder naming one project at all — the nearest `.sln` going up answers instead: `dotnet test` builds the solution and your filter selects the tests. Set `1` to arm; two solutions in one folder stay dotnet's ambiguity error, and a provable answer always beats the fallback. The static **Run lane** tasks cannot consult this: Zed has no per-OS task command, so they point `dotnet test` at the repository root and trust dotnet's own root resolution. The xunit case-row Run launcher is the exception — its proxy resolves the project under this same law before spawning the test. |
 | `ZATARA_LAUNCH_MODE` | unset | Forces the dispatch lane a launch takes: `project` or `test`, exact values only — anything else (wrong case included) acts as unset and the config's own shape answers instead. Read by the proxy at its env boundary; never a wire field. The [Program debug](#program-debug) section is where it earns attention. |
 | `ZATARA_PROGRAM_BUILD` | shipped with the door task — `1` | The exact tag pair the shipped **zatara: build & debug (workspace)** task carries — the claimable entry the locator claims as a program door and the debug scenario derives from (the `ZATARA_TEST_FILTER` law again: near-miss values and other names claim nothing). The plain **zatara: build (workspace)** entry carries no tag and claims nothing. Not yours to set. |
+| `ZATARA_CASE_RAW_1`, `ZATARA_CASE_RAW_2`, `ZATARA_CASE_RAW_3` | shipped with the generic InlineData case tasks — the slot's value as written in source | RAW envs: the shipped generic row task of the row's arity carries every slot's value exactly as written in source — a string slot WITH its quotes, a primitive slot bare. The locator forwards them verbatim into the debug scenario's `caseRawArguments`, and in whichever lane launches the row a value beginning with a double quote marks that slot's string lane: its filter part is the bare content, not `param: value` (the [AND-substring law](#first-gutter-debug): quotes never survive the filter transport). Not yours to set. |
 | `ZATARA_WORK_DIR` | set by the extension | The extension's work directory, which is the only place the proxy may write diagnostics. The extension always hands this over; you never set it. |
 | `ZATARA_RELEASE_WARNING` | reserved — set by nothing today | The seam a degraded session's reason *could* travel on. The extension logs its note to Zed's log directly and keeps this unset (owner ruling 2026-10-13: the degraded fact is a log note, never editor UI); a future proxy that consumes it must log it too. You never set it. |
 
@@ -246,19 +291,26 @@ typo surface as an error instead of a wrong session.
 | `args` | config | Arguments handed to the program. |
 | `request` | config | Which lane the config asks for: a program launch or a manual-pid attach. |
 | `process_id` | config | Manual-pid attach target, snake_case on purpose — the one deliberate exception to the camelCase vocabulary. |
-| `scope` | config | Gutter-click scope: method (default when absent), case, class, or file. The shipped gutter locator never emits it. |
+| `scope` | config | Gutter-click scope: method (default when absent), case, class, or file. The shipped gutter locator emits it only for case-row clicks — the tagged "Run case" tasks — and every other click keeps the pre-scope shape. |
 | `framework` | config | Test framework behind the target (nunit, mstest, xunit), consulted only for case scope. |
 | `caseArguments` | config | Displayed arguments of the invoked case, as displayed tokens. |
 | `methodParameters` | config | The invoked method's parameter names, zipped with `caseArguments` for the named-argument display. |
+| `caseStringSlots` | config | Optional, default empty. 1-based indices of the `caseArguments` slots holding string literals — the legacy string-slot marker, emitted only by row task files predating the RAW scheme. |
+| `caseRawArguments` | config | Optional, default empty. The case's values as written in source — a string slot WITH its quotes. A value beginning with a double quote marks that slot's string lane, and the proxy derives `caseStringSlots` from it when that field is absent or empty. |
 
 The shipped schema is the machine-readable form of this table:
-`crates/zatara/debug_adapter_schemas/zatara-netcoredbg.schema.json`. The locator emits exactly
-the test-lane fields it needs — `projectPath`, `fullyQualifiedName`, `cwd`, `env` —
-and nothing else: no scope or framework at all (both are fixed absent and
-serialize as omitted keys), and it never flips `resultsLog`: a gutter Debug session
-runs unlogged, and only a hand-written config opts into the results file. A gutter
-Debug session therefore exists only for one exact test; class and parameterized-case
-clicks run on the task lane instead (see [Templates](#templates)).
+`crates/zatara/debug_adapter_schemas/zatara-netcoredbg.schema.json`. What the
+locator emits depends on the clicked row: a plain method click emits
+`projectPath`, `fullyQualifiedName`, `cwd`, `env`; a case-row click also emits
+`scope`, `framework`, `caseArguments`, `methodParameters`, and
+`caseRawArguments` — the case keys travel as the task's literal
+`${ZED_CUSTOM_…}` capture markers, and Zed expands them when the session
+launches (`caseStringSlots` remains accepted for one release for row task files
+predating the RAW scheme). The locator never flips `resultsLog`: a gutter Debug
+session runs unlogged, and only a hand-written config opts into the results
+file. A gutter Debug session therefore exists for one exact test or one
+`[InlineData]` row; class clicks run on the task lane instead (see
+[Templates](#templates)).
 
 ### Diagnostics gates
 
@@ -391,7 +443,7 @@ attach truth is recorded on Windows — no mac CI. The rendezvous steps are in
 
 Pinning a profile at user level means one file, read from every repo. What
 follows is the recorded observation from the LOC-0135 probe — quoted from
-[docs/LOC-0135-user-level-merge-probe.md](docs/LOC-0135-user-level-merge-probe.md),
+[docs/LOC-0135-user-level-merge-probe.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/docs/LOC-0135-user-level-merge-probe.md),
 audited on Windows at Zed 1.24.2 (no mac CI) — and where the probe marked a
 step human-walkthrough-owed, the step appears as a marked gap below, never as
 an invented UI instruction.
@@ -463,16 +515,17 @@ mac CI.
 
 | Symptom | Cause and fix |
 |---------|---------------|
-| Zed never offers `zatara-netcoredbg` as a debugger, or the gutter Debug action goes nowhere | The adapter/locator declaration gap in [Status](CONTRIBUTING.md#status), or the per-language `debuggers` key does not match your language name exactly. |
+| Zed never offers `zatara-netcoredbg` as a debugger, or the gutter Debug action goes nowhere | The adapter/locator declaration gap in [Status](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md#status), or the per-language `debuggers` key does not match your language name exactly. |
 | Gutter Run/Debug icons do not appear right after installing the extension | Zed attaches an extension's tasks and test markers when a project opens — after installing, close the project and reopen it (or restart Zed) before the icons show. Fresh-reader observation, 2026-10-14: the gutter appeared only after the project was removed and reloaded. |
-| "None of the locators for task … completed successfully" | The task is not a zatara gutter action: it needs `ZATARA_TEST_FILTER` with an exact `FullyQualifiedName=` filter. (Where the test sits — the project folder or any folder inside it — the proxy's project search resolves the Debug lane's target itself.) |
-| Run prints MSB1003 or MSB1011 | The Run lane runs `dotnet test` against the repository root and lets dotnet find the project there (a solution, or exactly one project, subfolders included). A root that holds several projects with no solution is dotnet's ambiguity error to refuse — arm `ZATARA_FUZZY_MATCH=1` and the Debug lane will take the nearest solution instead, or add a solution at the root. |
+| "None of the locators for task … completed successfully" | The task is not a zatara gutter action: it needs `ZATARA_TEST_FILTER` with an exact `FullyQualifiedName=` filter — or, for a shipped "Run case" task, the substring form plus the `ZATARA_TEST_CASE=1` scope tag. (Where the test sits — the project folder or any folder inside it — the proxy's project search resolves the Debug lane's target itself.) |
+| Run prints MSB1003 or MSB1011 | A static Run task runs `dotnet test` against the repository root and lets dotnet find the project there (a solution, or exactly one project, subfolders included). A root that holds several projects with no solution is dotnet's ambiguity error to refuse — arm `ZATARA_FUZZY_MATCH=1` and the Debug lane will take the nearest solution instead, or add a solution at the root. The xunit case-row Run launcher is the exception: its proxy resolves the project first (the Debug lane's walk-up law) and declines honestly when it cannot. |
 | The session ends immediately with no test output | `ZATARA_RUNNER=0` is set (the runner is on by default since 2026-10-14) — remove it. |
 | The debug panel never says passed or failed | The run's report card is the **Console** tab: the vstest summary (`Passed! - Failed: 0, ...`) lands there when the session closes. Zed's debug panel carries no test-run state — that is an upstream gap (see [Upstream backlog](#upstream-backlog)), not something an extension can add. |
 | Session runs but the release is unreachable (private repository — GitHub answers 404 to anonymous asset downloads — or offline) | Working as designed: the session runs from the settings override or the cached binaries, and Zed's log carries a `degraded session` note naming what went unverified. Nothing appears in the editor. If there is no proxy on disk at all the session cannot start — point `dap.zatara-netcoredbg.binary` at one, run one session while a release is reachable so the cache fills, or publish the releases anonymously. |
 | "test host did not pause within 30s" | The framework never parked a `testhost`. Confirm the target is a runnable test, or raise `ZATARA_RUNNER_BANNER_TIMEOUT_SECS`. |
 | macOS: netcoredbg not found | **Apple-silicon:** zatara downloads the official osx-arm64 build automatically — this message means the pinned release was unreachable and nothing was cached yet; install netcoredbg from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and keep it on `PATH`. **Intel:** upstream publishes no Intel macOS build and there is no Homebrew formula — build netcoredbg from source and put it on `PATH`. |
 | The next build fails with file locks after a stopped session | A test host survived the stop. Retry the session; the proxy records every child it adopts and takes the whole tree down on stop and on crash, so a survivor is a bug worth reporting. |
+| `no xunit v3 test case matches ...` when Running/Debugging one xunit v3 row | The clicked row's runner-side name cannot be rebuilt from the source text (custom display names, enum flag/cast expressions). Run the method's gutter arrow to run all of its rows; the decline message names the method. |
 
 ## Upstream backlog
 
@@ -489,7 +542,7 @@ the project's maturity.
 ## Contributing
 
 Build commands, the internal design, the maturity ledger, and the full
-postmortem of the 2026-10 build are in [CONTRIBUTING.md](CONTRIBUTING.md).
+postmortem of the 2026-10 build are in [CONTRIBUTING.md](https://github.com/G-Builds-Here/zatara-netcoredbg/blob/main/CONTRIBUTING.md).
 
 ## Credits
 

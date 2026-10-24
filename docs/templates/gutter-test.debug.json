@@ -1,0 +1,12 @@
+{
+  "label": "Debug .NET test (exact FQN)",
+  "adapter": "zatara-netcoredbg",
+  "config": {
+    "projectPath": "C:/w/fx/Basic/Basic.csproj",
+    "fullyQualifiedName": "Basic.AddTests.AddsOneAndTwo",
+    "cwd": "C:/w/fx/Basic",
+    "env": {
+      "DOTNET_FILE": "C:/w/fx/Basic/BasicTest.cs"
+    }
+  }
+}

@@ -51,6 +51,16 @@ test-fake-adapter = []
 name = "zatara-proxy"
 path = "src/main.rs"
 
+# Console-subsystem counterpart of the GUI-subsystem proxy's `run-case`
+# branch. A console child inherits the Zed task's pseudo-terminal and its
+# live stdout renders there (the GUI proxy's does not — G2 live cycle
+# 2026-10-23), so the launcher runs this when present and the Run tab
+# streams the test output live with dotnet's verdict color intact. Same
+# `run_case()` code path, chosen by subsystem, not by argv.
+[[bin]]
+name = "zatara-run-case"
+path = "src/bin/run_case.rs"
+
 [[bin]]
 name = "zatara-fake-adapter"
 path = "src/bin/fake_adapter.rs"

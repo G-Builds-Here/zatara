@@ -3,6 +3,13 @@
 //! `attach{processId}` into the relay's own adapter child — no pid files, no
 //! %TEMP% rendezvous, no shell quoting layers (blueprint DR-2/DR-3).
 //!
+//! The build's green answer branches on what the resolved project IS: an
+//! xunit v3 / MTP test project (an Exe whose program IS the test run — no
+//! test host, no pause banner, vstest's filter silently dropped; probe
+//! 2026-10-20, `docs/XUNIT-V3-MTP-PROBE.md`) cannot ride that rendezvous
+//! ever, and goes to [`run_mtp_debug`] instead — the built test dll
+//! launched under the debugger with the runner's own filter grammar.
+//!
 //! The relay hands the launch over in its launch-validation Ok arm — the
 //! same verdict that grants `SessionPhase::Launched` (only
 //! [`Session::accept_launch`](crate::session::Session::accept_launch) does
@@ -155,6 +162,15 @@ fn build_argv(config: &LaunchConfig) -> Vec<String> {
 ///   `Name~` is the row predicate; xunit names its theory arguments in the
 ///   `DisplayName` (`a: 1, b: 2`), rebuilt here by zipping
 ///   `methodParameters` over `caseArguments` (positional when unnamed).
+///   An xunit case carrying `caseStringSlots` (an InlineData row with a
+///   string argument) instead ANDs per-slot parts: a string slot on its
+///   bare content, a primitive slot on `param: value` — quotes never
+///   survive the filter transport (measured 2026-10-21: the quoted exact
+///   display name matches 0 rows; bare substrings `&`-joined match 1).
+///   `caseRawArguments` (the generic per-arity tasks, one value per slot
+///   as written in source) marks the same slots by value: a raw value
+///   carrying its quotes is a string slot. It derives the slot set only
+///   when `caseStringSlots` is empty — shipped markers always win.
 /// - `class`: substring with the trailing dot — `=Ns.Class` matches zero
 ///   tests (live probe), `~Ns.Class.` selects exactly the class.
 /// - `file`: `fullyQualifiedName` carries the file's classes `|`-joined;
@@ -172,17 +188,80 @@ pub fn build_filter(config: &LaunchConfig) -> String {
                 "nunit" => format!("FullyQualifiedName~{fqn}&FullyQualifiedName~{}", args.join(",")),
                 "mstest" => format!("FullyQualifiedName~{fqn}&Name~{}", args.join(",")),
                 _ => {
-                    let display: Vec<String> = if config.method_parameters.is_empty() {
-                        args.iter().map(|a| a.to_string()).collect()
+                    // Two lanes carry the string-slot law to this point. The
+                    // classic per-shape tasks ship the STR markers directly
+                    // (`case_string_slots` present) and their
+                    // `method_parameters` name the primitive slots only —
+                    // consumed in step with the non-string slots below. The
+                    // generic per-arity tasks ship one RAW value per slot
+                    // instead, and a value written WITH its quotes marks
+                    // that slot's string lane; their `method_parameters`
+                    // name every slot, so the AND-branch reads them
+                    // positionally. Markers win over derivation: a classic
+                    // task's shipped keys are the truth.
+                    let derived: Vec<u32>;
+                    let string_slots: &[u32] = if !config.case_string_slots.is_empty() {
+                        &config.case_string_slots
                     } else {
-                        config
-                            .method_parameters
+                        derived = config
+                            .case_raw_arguments
                             .iter()
-                            .zip(args.iter())
-                            .map(|(param, arg)| format!("{param}: {arg}"))
-                            .collect()
+                            .enumerate()
+                            // The double-quote char written quote-free: a raw
+                            // quote char literal here would flip the
+                            // docs_setting_drift harvest's quote parity
+                            // (LOC-0125 law).
+                            .filter(|(_, raw)| raw.starts_with('\u{22}'))
+                            .map(|(i, _)| (i + 1) as u32)
+                            .collect();
+                        &derived
                     };
-                    format!("FullyQualifiedName~{fqn}&DisplayName~{}", display.join(", "))
+                    let positional_params = config.case_string_slots.is_empty();
+                    if string_slots.is_empty() {
+                        let display: Vec<String> = if config.method_parameters.is_empty() {
+                            args.iter().map(|a| a.to_string()).collect()
+                        } else {
+                            config
+                                .method_parameters
+                                .iter()
+                                .zip(args.iter())
+                                .map(|(param, arg)| format!("{param}: {arg}"))
+                                .collect()
+                        };
+                        format!("FullyQualifiedName~{fqn}&DisplayName~{}", display.join(", "))
+                    } else {
+                        // The AND-substring law (measured 2026-10-21 against a
+                        // live xunit 2.4.2 host): a row containing strings is
+                        // selected by a `&`-chain of substring parts — a
+                        // string slot contributes its bare content (quotes
+                        // never survive the filter transport, so the exact
+                        // display name is unfilterable), a primitive slot its
+                        // `param: value`. `method_parameters` names the
+                        // primitive slots only, in slot order, so it is
+                        // consumed in step with the non-string slots; a
+                        // missing name degrades to the bare argument.
+                        let mut params = config.method_parameters.iter();
+                        let parts: Vec<String> = args
+                            .iter()
+                            .enumerate()
+                            .map(|(i, arg)| {
+                                if string_slots.contains(&((i + 1) as u32)) {
+                                    format!("DisplayName~{arg}")
+                                } else if positional_params {
+                                    match config.method_parameters.get(i) {
+                                        Some(param) => format!("DisplayName~{param}: {arg}"),
+                                        None => format!("DisplayName~{arg}"),
+                                    }
+                                } else {
+                                    match params.next() {
+                                        Some(param) => format!("DisplayName~{param}: {arg}"),
+                                        None => format!("DisplayName~{arg}"),
+                                    }
+                                }
+                            })
+                            .collect();
+                        format!("FullyQualifiedName~{fqn}&{}", parts.join("&"))
+                    }
                 }
             }
         }
@@ -210,7 +289,7 @@ fn dot_terminate(class: &str) -> String {
 /// `--filter` flag its own — no shell ever sees a quoted compound. The
 /// optional `resultsLog` (D27) appends dotnet's own trx writer, as two
 /// more whole entries; off by default, so the ordinary argv is unchanged.
-fn test_argv(config: &LaunchConfig) -> Vec<String> {
+pub(crate) fn test_argv(config: &LaunchConfig) -> Vec<String> {
     let mut argv = vec![
         "dotnet".into(),
         "test".into(),
@@ -227,7 +306,7 @@ fn test_argv(config: &LaunchConfig) -> Vec<String> {
 
 /// Where the orchestrated steps run: the launch config's cwd, falling back
 /// to the project's own directory when the config left it blank.
-fn work_dir(config: &LaunchConfig) -> String {
+pub(crate) fn work_dir(config: &LaunchConfig) -> String {
     if !config.cwd.is_empty() {
         return config.cwd.clone();
     }
@@ -648,6 +727,109 @@ fn test_env(config: &LaunchConfig) -> Vec<(String, String)> {
         config.env.iter().flat_map(|map| map.clone().into_iter()).collect();
     env.push(("VSTEST_HOST_DEBUG".to_string(), "1".to_string()));
     env
+}
+
+/// The xunit v3 / MTP debug lane (2026-10-20): the built test dll rides a
+/// proxy-authored `launch{program,args,cwd}` to the adapter — the
+/// debugger becomes the test process's parent, binds breakpoints in the
+/// lane where binding works (LOC-0133's launch law; LOC-0134 pinned the
+/// attach lane's bindings never verify on this engine), and the run
+/// carries the requested scope as the runner's own filter.
+///
+/// No pty step and no settle arm: this session is program-shaped from the
+/// launch answer onward — the debuggee's summary prints through the
+/// debugger's own output events, not through a proxy-spawned CLI printing
+/// after the debuggee died. The program law (`begin_program_session`)
+/// adopts the adapter tree before the launch so the debuggee is born
+/// inside the session's containment, and a failing test's nonzero exit
+/// lands as the program-law error note.
+fn run_mtp_debug(tunnel: Arc<Tunnel>, config: &LaunchConfig, launch_seq: i64) {
+    let csproj = Path::new(&config.project_path);
+    if config.results_log {
+        // Named, not dropped: the vstest CLI writes the trx and this lane
+        // does not run it. The MTP trx writer is a separate package no
+        // probe has wired — see docs/XUNIT-V3-MTP-PROBE.md.
+        send_output(
+            &tunnel,
+            "zatara: resultsLog is not wired on the MTP debug lane (no dotnet test runner involved)\n"
+                .to_string(),
+            "stderr",
+        );
+    }
+    let program = match crate::discovery::locate_built_dll(csproj) {
+        Ok(dll) => dll,
+        // The build step above just ran green on this very project, so a
+        // missing dll names a build output the repo redirected elsewhere
+        // (OutDir) — discovery's own words, which name the expected path.
+        Err(e) => return fail_launch(&tunnel, launch_seq, &e.to_string()),
+    };
+    // A case click resolves against the built dll first (XUNIT-V3-MTP): the
+    // row's id exists only in `-list` discovery output, so the selector for
+    // this scope is discovered, not composed. An unresolvable row declines
+    // through the same honest fail_launch the refusal used — never a silent
+    // widen to the whole method.
+    let case_id = if config.scope.as_deref() == Some("case") {
+        match crate::mtp_case::resolve_case_id(&program, config) {
+            Ok(id) => Some(id),
+            Err(reason) => return fail_launch(&tunnel, launch_seq, &reason),
+        }
+    } else {
+        None
+    };
+    let args = match mtp_test_args(config, case_id.as_deref()) {
+        Ok(args) => args,
+        Err(reason) => return fail_launch(&tunnel, launch_seq, &reason),
+    };
+    let cwd = work_dir(config);
+    // Narrated before it rides: the client sees the exact process — dll
+    // plus filter args — that its gutter click turned into.
+    let mut argv = vec![program.display().to_string()];
+    argv.extend(args.iter().cloned());
+    announce(&tunnel, &argv);
+    tunnel.begin_program_session();
+    if let Err(e) =
+        tunnel.launch_program(&program.display().to_string(), &args, &cwd, launch_seq)
+    {
+        fail_launch(&tunnel, launch_seq, &format!("launch{{program}}: {e}"));
+    }
+}
+
+/// The MTP runner's own filter grammar for a launch — argv-shaped, one
+/// entry per flag and per value, no shell between (DR-2). The single-dash
+/// spellings are the direct-execution parser's (probe rows 6-8: this is
+/// the table `XunitV3Fx.exe -?` prints); the pipe-mode `--filter-*`
+/// spellings belong to `dotnet test` forwarding, which is the Run lane's
+/// world, not the debugger's. Scope rules mirror `build_filter`'s lanes:
+/// method by name, class by type name (the wire's trailing vstest dot
+/// trimmed), file by its pipe-joined classes repeated per class. A `case`
+/// scope now rides its discovered row id (`case_id`, resolved by the caller
+/// from `-list` against the built dll) — the runner selects one data row only
+/// by that opaque id, so an unresolved case is an error, never a widen.
+fn mtp_test_args(config: &LaunchConfig, case_id: Option<&str>) -> Result<Vec<String>, String> {
+    let fqn = &config.fully_qualified_name;
+    match config.scope.as_deref().unwrap_or("method") {
+        "case" => match case_id {
+            Some(id) => Ok(crate::mtp_case::id_args(id)),
+            None => Err("zatara: the xunit v3 / MTP debug lane could not resolve this \
+                        theory case to a runner test-case id — the row's arguments matched \
+                        no enumerated case; click the method's gutter arrow to debug every \
+                        case of it"
+                .to_string()),
+        },
+        "class" => Ok(vec!["-class".to_string(), trim_class_dot(fqn)]),
+        "file" => Ok(fqn
+            .split('|')
+            .flat_map(|class| ["-class".to_string(), trim_class_dot(class)])
+            .collect()),
+        _ => Ok(vec!["-method".to_string(), fqn.clone()]),
+    }
+}
+
+/// The wire carries class names dot-terminated for vstest's substring
+/// grammar (`FullyQualifiedName~Ns.Class.` matches the class boundary);
+/// the MTP parser takes the bare type name and wildcards itself.
+fn trim_class_dot(name: &str) -> String {
+    name.strip_suffix('.').unwrap_or(name).to_string()
 }
 
 /// Kill the whole process tree rooted at `pid`. The direct child is the
@@ -1116,7 +1298,7 @@ fn parent_of(pid: u32) -> Option<u32> {
 /// Rewrite only where the filesystem proves the answer; everything else
 /// travels untouched, so a hand-written path that names a project elsewhere
 /// keeps its intent and a genuinely missing one stays dotnet's honest error.
-fn resolve_project_path(config: &mut LaunchConfig) {
+pub(crate) fn resolve_project_path(config: &mut LaunchConfig) {
     let fuzzy = fuzzy_armed(std::env::var("ZATARA_FUZZY_MATCH").ok().as_deref());
     resolve_project_path_with(config, fuzzy);
 }
@@ -1183,6 +1365,30 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
             cursor = ancestor.parent();
         }
     }
+    // Gutter-file-proven lane (live defect, owner 2026-10-21): a
+    // solution-rooted repo sends projectPath = the workspace root plus the
+    // opened file as DOTNET_FILE, and the ancestor walk above climbs the
+    // WRONG direction — the test project lives BELOW the root, so the MTP
+    // check never saw a csproj and the vstest lane ran the whole solution.
+    // The file's own path PROVES which project the click aimed at: walk up
+    // from its directory for a unique csproj, same strict law — an
+    // ambiguous directory on the way is a refusal, not a guess.
+    if let Some(file) = gutter_file_from_env(&config) {
+        let mut cursor = file.parent();
+        while let Some(ancestor) = cursor {
+            if let Some(project) = unique_project(ancestor) {
+                eprintln!(
+                    "zatara: projectPath '{}' resolved to '{}' (walked up from the gutter file '{}')",
+                    config.project_path,
+                    project.display(),
+                    file.display()
+                );
+                config.project_path = project.display().to_string();
+                return;
+            }
+            cursor = ancestor.parent();
+        }
+    }
     if fuzzy {
         let mut cursor = Some(path);
         while let Some(dir) = cursor {
@@ -1198,6 +1404,16 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
             cursor = dir.parent();
         }
     }
+}
+
+/// The gutter's opened file, if the launch env carries one: `DOTNET_FILE`
+/// ships on every zatara gutter task (tasks.json's env contract), and only
+/// a value naming a REAL file counts — an unexpanded template variable is
+/// no evidence of anything.
+fn gutter_file_from_env(config: &LaunchConfig) -> Option<PathBuf> {
+    let raw = config.env.as_ref()?.get("DOTNET_FILE")?;
+    let path = Path::new(raw.as_str());
+    path.is_file().then(|| path.to_path_buf())
 }
 
 /// Whether `dir` holds any `.csproj` at all — the walk-up's gate: only a
@@ -1289,6 +1505,24 @@ fn run(tunnel: Arc<Tunnel>, runner: RunnerConfig, mut config: LaunchConfig, laun
     // A green build needs no pump drain: only the failure paths answer
     // and end the session, and those drain before answering (see
     // `Step::drain_pump`).
+    // The green build answers one question before Step 2: what IS the
+    // resolved project? An xunit v3 / MTP test project has no vstest
+    // rendezvous to ride — no host to pause, no `Process Id:` banner, and
+    // `--filter` itself silently dropped (MTP0001). The attach lane below
+    // can only ever time out on it; the MTP debug lane launches the built
+    // test dll under the debugger instead, filtered by the runner's own
+    // grammar. Every other project keeps the rendezvous unchanged.
+    // The answer also closes the relay's pre-decision stash window (live
+    // defect 2026-10-21, the true shape of walkthrough finding 3b: the
+    // client's configurationDone rode through to the adapter during the
+    // build and timed the MTP launch out): the rendezvous decision frees
+    // the stashed frame to buffer pre-attach, the MTP decision holds it
+    // for the pump's launch correlation.
+    let mtp_lane = crate::discovery::mtp_test_project(Path::new(&config.project_path));
+    tunnel.runner_lane_decided(mtp_lane);
+    if mtp_lane {
+        return run_mtp_debug(tunnel, &config, launch_seq);
+    }
     // Step 2: the test, spawned paused (`VSTEST_HOST_DEBUG=1`). vstest
     // blocks the host until a debugger attaches and announces it with a
     // `Process Id:` banner — the pid is the whole rendezvous, no file ever
@@ -1441,6 +1675,72 @@ mod tests {
         assert!(runner_armed(Some("yes")), "a typo'd arm value arms rather than silently off-ing");
         assert!(!runner_armed(Some("0")), "the one documented opt-out still opts out");
         assert!(runner_armed(Some("0 ")), "only the exact `0` opts out — a trailing space is a typo, not an opt-out");
+    }
+
+    /// The MTP debug lane's filter table, pinned scope by scope
+    /// (xunit v3 / MTP, 2026-10-20): the single-dash direct-execution
+    /// grammar, one argv entry per flag and value, mirroring
+    /// `build_filter`'s scope law — method exact, class with the wire's
+    /// vstest trailing dot trimmed, file as one `-class` per class.
+    #[test]
+    fn the_mtp_grammar_maps_every_gutter_scope_to_the_runner_s_own_flags() {
+        let method = LaunchConfig {
+            fully_qualified_name: "Ns.Calc.Adds".into(),
+            ..Default::default()
+        };
+        assert_eq!(mtp_test_args(&method, None).unwrap(), ["-method", "Ns.Calc.Adds"]);
+        // An unrecognised scope answers like the default — the same law
+        // `build_filter` keeps for pre-scope wire clients.
+        let odd = LaunchConfig {
+            fully_qualified_name: "Ns.Calc.Adds".into(),
+            scope: Some("something-else".into()),
+            ..Default::default()
+        };
+        assert_eq!(mtp_test_args(&odd, None).unwrap(), ["-method", "Ns.Calc.Adds"]);
+        let class = LaunchConfig {
+            fully_qualified_name: "Ns.CalcTests.".into(),
+            scope: Some("class".into()),
+            ..Default::default()
+        };
+        assert_eq!(mtp_test_args(&class, None).unwrap(), ["-class", "Ns.CalcTests"]);
+        let file = LaunchConfig {
+            fully_qualified_name: "Ns.A|Ns.B".into(),
+            scope: Some("file".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            mtp_test_args(&file, None).unwrap(),
+            ["-class", "Ns.A", "-class", "Ns.B"],
+            "the file's pipe-joined classes each ride their own -class flag"
+        );
+    }
+
+    /// The single row is now a discovered row-id (XUNIT-V3-MTP, 2026-10-24):
+    /// a resolved case scope runs `-preEnumerateTheories -id <id>`, the
+    /// pre-enumeration flag riding the run because an id names nothing
+    /// without it (measured: `-id` alone selects zero). An UNRESOLVED row is
+    /// still the honest refusal naming the method click — the lane never
+    /// guesses that a case click means "run all its siblings".
+    #[test]
+    fn a_single_theory_case_rides_its_row_id_and_only_an_unresolved_one_refuses() {
+        let case = LaunchConfig {
+            fully_qualified_name: "Ns.Calc.AddsCases".into(),
+            scope: Some("case".into()),
+            case_arguments: vec!["1".into(), "2".into()],
+            ..Default::default()
+        };
+        // Resolved row: the id argv, flag included.
+        assert_eq!(
+            mtp_test_args(&case, Some("abc123")).unwrap(),
+            ["-preEnumerateTheories", "-id", "abc123"]
+        );
+        // Unresolved row: refusal, naming what to click instead.
+        let err = mtp_test_args(&case, None)
+            .expect_err("an unresolved case must refuse, not widen");
+        assert!(
+            err.contains("method") && err.contains("case"),
+            "the refusal must name both what it cannot do and what to click: {err}"
+        );
     }
 
     /// Rule 3 on D11 (owner go 2026-10-14): the drain used to block on the
@@ -1771,6 +2071,55 @@ mod tests {
     }
 
     #[test]
+    fn a_solution_rooted_gutter_click_finds_its_project_below_the_root() {
+        // Owner's live shape (2026-10-21, walkthrough finding 3a): gutter
+        // Debug in a solution-rooted repo sends projectPath = the workspace
+        // root; the test project lives UNDER the root, so neither the root
+        // scan nor the ancestor walk could ever see it — the MTP check got
+        // a directory, said no, and the vstest lane ran the whole solution.
+        // The launch env's DOTNET_FILE names the opened file: the walk that
+        // goes the right direction starts at the file.
+        let root = fs_temp("slnroot");
+        let tests = root.join("tests").join("V3Tests");
+        let api = root.join("src").join("Api");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::create_dir_all(&api).unwrap();
+        std::fs::write(&root.join("repo.sln"), b"# solution").unwrap();
+        std::fs::write(&api.join("Api.csproj"), b"<Project/>").unwrap();
+        std::fs::write(&tests.join("V3Tests.csproj"), b"<Project/>").unwrap();
+        let opened = tests.join("CalcTests.cs");
+        std::fs::write(&opened, b"//").unwrap();
+
+        let mut config = config_naming(&root);
+        config.env = Some(std::collections::BTreeMap::from([(
+            "DOTNET_FILE".to_string(),
+            opened.display().to_string(),
+        )]));
+        resolve_project_path_with(&mut config, true);
+        assert_eq!(
+            config.project_path,
+            tests.join("V3Tests.csproj").display().to_string(),
+            "the gutter file's own project beats even the fuzzy solution — \
+             the file PROVES the aim, a solution builds the whole repo"
+        );
+
+        // The proof needs a real file: an unexpanded template variable is
+        // no evidence, and the shape must fall through to the old lanes
+        // (here: the fuzzy solution, the pre-fix answer, unchanged).
+        let mut literal = config_naming(&root);
+        literal.env = Some(std::collections::BTreeMap::from([(
+            "DOTNET_FILE".to_string(),
+            "$ZED_FILE".to_string(),
+        )]));
+        resolve_project_path_with(&mut literal, true);
+        assert_eq!(
+            literal.project_path,
+            root.join("repo.sln").display().to_string(),
+            "a non-file DOTNET_FILE changes nothing: the fuzzy solution still answers"
+        );
+    }
+
+    #[test]
     fn an_ambiguous_directory_resolves_only_by_the_naming_convention() {
         let named = fs_temp("namematch");
         let stem = named.file_name().unwrap().to_string_lossy().into_owned();
@@ -1985,6 +2334,100 @@ mod tests {
         assert_eq!(
             build_filter(&config),
             "FullyQualifiedName~Ns.TheoryTests.AddsCases&DisplayName~1, 2"
+        );
+    }
+
+    #[test]
+    fn a_string_slot_case_filter_ands_content_and_param_parts() {
+        // The AND-substring law (measured 2026-10-21, live xunit 2.4.2): the
+        // string slot filters on its bare content, each primitive slot on
+        // `param: value`, the parts `&`-joined. Quotes are never emitted —
+        // the exact display name with quotes measures 0 matches because the
+        // transport strips them before vstest sees the filter.
+        let mut config = scoped("Ns.TheoryTests.Mixed3", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["a".into(), "1".into(), "True".into()];
+        config.method_parameters = vec!["n".into(), "flag".into()];
+        config.case_string_slots = vec![1];
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.Mixed3&DisplayName~a&DisplayName~n: 1&DisplayName~flag: True"
+        );
+    }
+
+    #[test]
+    fn string_slot_markers_keep_the_parameter_names_slot_aligned() {
+        // `method_parameters` carries only the primitive slots' names, in
+        // slot order — the marker indices decide which argument consumes
+        // which name. Slots 1 and 3 are primitives here, slot 2 the string.
+        let mut config = scoped("Ns.TheoryTests.Middle", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["1".into(), "x".into(), "2".into()];
+        config.method_parameters = vec!["a".into(), "b".into()];
+        config.case_string_slots = vec![2];
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.Middle&DisplayName~a: 1&DisplayName~x&DisplayName~b: 2"
+        );
+    }
+
+    #[test]
+    fn no_string_slot_markers_keep_the_classic_zip_byte_for_byte() {
+        // Regression pin: an empty marker list takes the pre-string zip
+        // path untouched — the xunit-2 wire bytes are what they always were.
+        let mut config = scoped("Ns.TheoryTests.AddsCases", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["2".into(), "3".into(), "5".into()];
+        config.method_parameters = vec!["a".into(), "b".into(), "expected".into()];
+        config.case_string_slots = Vec::new();
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.AddsCases&DisplayName~a: 2, b: 3, expected: 5"
+        );
+    }
+
+    #[test]
+    fn raw_values_derive_the_string_slots_and_match_the_marker_lane() {
+        // The generic per-arity lane: no STR markers, one RAW value per slot
+        // as written in source. The quoted raw value marks slot 1's string
+        // lane; the unquoted ones are primitives whose names sit at their own
+        // positions (the generic capture names every parameter, unlike the
+        // classic primitive-only list). Same filter bytes the marker lane's
+        // Mixed3 test measures.
+        let mut config = scoped("Ns.TheoryTests.Mixed3", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["a".into(), "1".into(), "True".into()];
+        config.method_parameters = vec!["s".into(), "n".into(), "flag".into()];
+        config.case_raw_arguments = vec!["\"a\"".into(), "1".into(), "True".into()];
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.Mixed3&DisplayName~a&DisplayName~n: 1&DisplayName~flag: True"
+        );
+    }
+
+    #[test]
+    fn all_primitive_raw_values_keep_the_classic_zip() {
+        // A generic task over an all-primitive row derives no slots at all —
+        // the zip lane stays byte-for-byte the classic xunit-2 shape.
+        let mut config = scoped("Ns.TheoryTests.TwoInts", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["1".into(), "2".into()];
+        config.method_parameters = vec!["a".into(), "b".into()];
+        config.case_raw_arguments = vec!["1".into(), "2".into()];
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.TwoInts&DisplayName~a: 1, b: 2"
+        );
+    }
+
+    #[test]
+    fn shipped_string_slot_markers_win_over_raw_derivation() {
+        // Markers are the shipped truth: where a classic task carries both
+        // keys, the derivation never overrules the marker indices — slot 2
+        // (not the quoted raw's slot 1) reads as the string part.
+        let mut config = scoped("Ns.TheoryTests.Middle", Some("case"), Some("xunit"));
+        config.case_arguments = vec!["x".into(), "y".into()];
+        config.method_parameters = vec!["b".into()];
+        config.case_string_slots = vec![2];
+        config.case_raw_arguments = vec!["\"x\"".into(), "y".into()];
+        assert_eq!(
+            build_filter(&config),
+            "FullyQualifiedName~Ns.TheoryTests.Middle&DisplayName~b: x&DisplayName~y"
         );
     }
 

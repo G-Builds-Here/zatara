@@ -48,6 +48,27 @@ pub struct LaunchConfig {
     /// rebuild xunit's named-argument display (`a: 1, b: 2, …`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub method_parameters: Vec<String>,
+    /// 1-based indices of the `case_arguments` slots whose InlineData
+    /// argument is a string literal (from `ZATARA_CASE_STR_*` task env).
+    /// The proxy's AND-substring filter law reads them: a string slot is
+    /// matched by its bare content (`DisplayName~<content>`), because quotes
+    /// never survive the filter transport; primitive slots keep the
+    /// `DisplayName~<param>: <value>` part. Empty means the classic
+    /// all-primitives zip — omit-if-empty, so every pre-string wire byte
+    /// is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub case_string_slots: Vec<u32>,
+    /// The per-slot InlineData values as written in source (`"a"` WITH the
+    /// quotes, `1` bare), from `ZATARA_CASE_RAW_*` task env — shipped by the
+    /// per-arity generic templates, where one key exists for every slot of
+    /// the arity so the template never references a capture the match lacks
+    /// (Zed's hide law). A value beginning with a double quote marks that
+    /// slot's string lane; the proxy derives `case_string_slots` from the
+    /// same list when
+    /// the STR markers are absent. Omit-if-empty: a classic per-shape task's
+    /// wire bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub case_raw_arguments: Vec<String>,
     /// Test-results capture (owner triage D27): `true` makes the proxy append
     /// dotnet's own `--logger trx` to the test step, so each run writes a
     /// `.trx` results file under `TestResults/`. Off by default — absent or
@@ -161,6 +182,10 @@ struct LaunchConfigWire {
     #[serde(default)]
     method_parameters: Vec<String>,
     #[serde(default)]
+    case_string_slots: Vec<u32>,
+    #[serde(default)]
+    case_raw_arguments: Vec<String>,
+    #[serde(default)]
     results_log: bool,
     program: Option<String>,
     args: Option<Vec<String>>,
@@ -207,6 +232,8 @@ impl TryFrom<LaunchConfigWire> for LaunchConfig {
             framework: wire.framework,
             case_arguments: wire.case_arguments,
             method_parameters: wire.method_parameters,
+            case_string_slots: wire.case_string_slots,
+            case_raw_arguments: wire.case_raw_arguments,
             results_log: wire.results_log,
             program: wire.program,
             args: wire.args,

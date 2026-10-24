@@ -389,6 +389,15 @@ pub(crate) struct Tunnel {
     /// Zed polls `threads` on the launch answer, netcoredbg refuses until
     /// resumed, and Zed aborts before its `configurationDone` is ever sent.
     configuration_done: AtomicBool,
+    /// The client's `configurationDone` seq while a program launch is
+    /// still in flight: Zed sends it before the launch answer lands and
+    /// netcoredbg does not buffer it pre-launch (live defect 2026-10-21,
+    /// walkthrough 3b — the early frame made its launch answer time out).
+    /// The client arm stashes here; the pump's launch correlation arm
+    /// takes it out — success answered locally after the launch answer,
+    /// failure answered with the launch refusal. `end_session` drains it
+    /// defensively so a dying session never leaves the request hanging.
+    pending_config_done: Mutex<Option<i64>>,
     /// The one-shot settle gate the build-orchestration runner arms while
     /// it still owns the test step: the relay holds the adapter's
     /// session-end events (`exited`, then `terminated`) behind it, so the
@@ -412,10 +421,25 @@ pub(crate) struct Tunnel {
     /// Set once a project-mode launch takes this relay's adapter: the
     /// session owns a debuggee, so its ending speaks program truth — a
     /// nonzero `exited` arrives with an error-level announcement naming
-    /// the code (blueprint §6 "programrunner -> relay (exit)"). The test
-    /// lane never sets it (only `program::start` does), which is what
-    /// keeps LOC-0109's bytes untouched by this law.
+    /// the code (blueprint §6 "programrunner -> relay (exit)"). The vstest
+    /// rendezvous lane never sets it — `program::start` raises it, and the
+    /// runner's MTP debug lane raises it immediately before its authored
+    /// launch — which is what keeps LOC-0109's bytes untouched by this law.
     program_session: AtomicBool,
+    /// Set while a runner-backed Test launch is still being decided (the
+    /// build window, then the MTP-vs-rendezvous question the green build
+    /// answers). The lane is unknown during this window, and the MTP lane
+    /// forbids forwarding a pre-launch configurationDone (netcoredbg does
+    /// not buffer one pre-LAUNCH; the early frame is what answers the
+    /// launch `Command execution timed out.` — live defect 2026-10-21,
+    /// xv3amb engine log) — so the relay's read loop (which sets this flag
+    /// while processing the launch, before the runner's worker thread
+    /// ever exists: no thread-race window) stashes the frame instead.
+    /// [`Self::runner_lane_decided`] closes the window: the rendezvous
+    /// decision forwards the stashed frame (pre-attach buffering, the
+    /// LOC-0109 law unchanged), the MTP decision holds it for the pump's
+    /// launch correlation.
+    runner_launch_pending: AtomicBool,
     /// The adapter's own tree, adopted at a program launch (LOC-0126):
     /// Windows pins it into a kill-on-close job so the debuggee netcoredbg
     /// spawns under it falls with every session-end path the proxy owns —
@@ -476,6 +500,62 @@ impl Tunnel {
         self.program_session.store(true, Ordering::SeqCst);
         let pid = self.child.lock().expect("child lock poisoned").id();
         self.adapter_tree.adopt(Some(pid));
+    }
+
+    /// Open the runner's pre-decision stash window (see the field doc).
+    /// Called by the relay's own read loop while it processes the launch
+    /// request — before the runner's worker thread is spawned — so the
+    /// `configurationDone` that rides in right behind the launch always
+    /// meets an armed window.
+    pub(crate) fn note_runner_launch_pending(&self) {
+        self.runner_launch_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// Close the pre-decision window once the green build answers the
+    /// MTP-vs-rendezvous question. The rendezvous lane releases the
+    /// client's own frame to the adapter now (still pre-attach: the test
+    /// step has not even been spawned, and netcoredbg buffers a
+    /// pre-attach configurationDone and resumes on attach — the exact
+    /// ride the same frame had before this window existed, only a step
+    /// later). The MTP lane keeps the stash; its release is the pump's
+    /// launch-correlation arm.
+    pub(crate) fn runner_lane_decided(&self, mtp_lane: bool) {
+        self.runner_launch_pending.store(false, Ordering::SeqCst);
+        if mtp_lane {
+            return;
+        }
+        let stashed = self
+            .pending_config_done
+            .lock()
+            .expect("pending configDone lock poisoned")
+            .take();
+        if let Some(client_seq) = stashed {
+            if let Some(log) = &self.log {
+                log.note("relay: stashed configurationDone forwarded (rendezvous lane, pre-attach)");
+            }
+            // The frame must carry the CLIENT's seq into the tracked
+            // forward: `forward_to_child` correlates from the request's
+            // own `seq` field, so a seq-less synthesized frame was
+            // remembered against client 0 and the adapter's answer left
+            // this pipe carrying a request_seq Zed never sent — the
+            // client's own request stayed unanswered for the whole
+            // session. That unanswered request is what ends a healthy run
+            // in a failure: Zed's `initialize_sequence` returns error
+            // when its in-flight request is dropped, and `Tried to launch
+            // debugger with:` (project/src/debugger/session.rs:992) is
+            // the console print of exactly that error. Owner round 5,
+            // 2026-10-22, xvcase: the run passed, breakpoints hit, the
+            // panel stepped, and the session still died at teardown. The
+            // copy is the client's request delivered at the adapter's
+            // earliest legal moment — deliver it with the client's
+            // identity.
+            let _ = self.forward_to_child(&json!({
+                "type": "request",
+                "seq": client_seq,
+                "command": "configurationDone",
+                "arguments": {},
+            }));
+        }
     }
 
     /// Blueprint §6's exit body: a nonzero program exit announced at error
@@ -567,6 +647,51 @@ impl Tunnel {
             .insert(
                 child_seq,
                 InFlight { client_seq, command: client_command.to_string() },
+            );
+        let body = outbound.to_string();
+        let mut child_in = self.child_in.lock().expect("child stdin lock poisoned");
+        write_frame(&mut *child_in, body.as_bytes())
+    }
+
+    /// Send a proxy-authored `launch{program,args,cwd}` to the adapter —
+    /// the xunit v3 / MTP debug lane's door (2026-10-20). An MTP test
+    /// project has no test host to pause and no pid to attach: the test
+    /// run IS the program (probe rows 3+9), so the debugger must be the
+    /// process's parent. The correlation law is `attach_process`'s
+    /// unchanged — the client asked for a launch it could not get from
+    /// the raw body (the client's body names a test, not a program), and
+    /// the adapter's launch answer rides back as the answer to the
+    /// client's original launch request. The body shape is the LOC-0133
+    /// probe's: program + args + cwd on a launch, the dll form the
+    /// programrunner arm already ships.
+    pub(crate) fn launch_program(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &str,
+        client_seq: i64,
+    ) -> io::Result<()> {
+        let child_seq = self.next_child_seq();
+        let outbound = json!({
+            "seq": child_seq,
+            "type": "request",
+            "command": "launch",
+            "arguments": {
+                "type": "coreclr",
+                "name": "zatara: debug test",
+                "request": "launch",
+                "stopAtEntry": false,
+                "program": program,
+                "args": args,
+                "cwd": cwd,
+            },
+        });
+        self.pending
+            .lock()
+            .expect("pending map lock poisoned")
+            .insert(
+                child_seq,
+                InFlight { client_seq, command: "launch".to_string() },
             );
         let body = outbound.to_string();
         let mut child_in = self.child_in.lock().expect("child stdin lock poisoned");
@@ -737,6 +862,49 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                             "arguments": {},
                         }));
                     }
+                    // The program lane's twin pairing (live defect
+                    // 2026-10-21, walkthrough 3b): the proxy-authored
+                    // launch answers launch/launch on a program session.
+                    // The client's configurationDone was STASHED by the
+                    // client arm (netcoredbg does not buffer it
+                    // pre-launch — the early frame is what timed the
+                    // launch answer out). The release mirrors the attach
+                    // law's ORDER — the copy goes to the adapter BEFORE
+                    // the launch answer leaves, the stashed seq is
+                    // answered right after it — but the copy itself rides
+                    // a narrower law than the attach lane's: it is the
+                    // CLIENT's own request being delivered at the only
+                    // moment the adapter can take it, authored only when
+                    // a request is actually stashed. A client that never
+                    // sends one (LOC-0133's raw-script flow, pinned by
+                    // the e2e order law) keeps its stream exactly as
+                    // measured: the debuggee is already running when a
+                    // program launch answers, so — unlike the attach
+                    // lane — an unrequested resume would fix no deadlock
+                    // and only add a frame nobody asked for.
+                    let program_launch_answer = matches!(in_flight.command.as_str(), "launch")
+                        && message.get("command").and_then(Value::as_str) == Some("launch")
+                        && tunnel.program_session.load(Ordering::SeqCst);
+                    let stashed_at_launch = if program_launch_answer
+                        && message.get("success").and_then(Value::as_bool) == Some(true)
+                    {
+                        let stashed = tunnel
+                            .pending_config_done
+                            .lock()
+                            .expect("pending configDone lock poisoned")
+                            .take();
+                        tunnel.configuration_done.store(true, Ordering::SeqCst);
+                        if stashed.is_some() {
+                            let _ = tunnel.forward_to_child_untracked(&json!({
+                                "type": "request",
+                                "command": "configurationDone",
+                                "arguments": {},
+                            }));
+                        }
+                        stashed
+                    } else {
+                        None
+                    };
                     // §6's law for the step the client only shows as a
                     // dead button (live finding 2026-10-16): the refusal
                     // reaches the user as a failure AND as one visible
@@ -758,9 +926,53 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                         None
                     };
                     let client_command = in_flight.command.clone();
+                    // The attach/test lane's benign configurationDone
+                    // E_FAIL is answered as success before the frame
+                    // leaves (law on the helper): Zed reads the raw
+                    // refusal as a broken debugger while the engine is
+                    // demonstrably running. Program-lane failures reach
+                    // the client untouched.
+                    if answer_benign_attach_config_done(
+                        &mut message,
+                        &client_command,
+                        tunnel.program_session.load(Ordering::SeqCst),
+                    ) {
+                        if let Some(log) = &tunnel.log {
+                            log.note("relay: benign attach configurationDone E_FAIL answered as success");
+                        }
+                    }
                     message["request_seq"] = json!(in_flight.client_seq);
                     message["command"] = json!(in_flight.command);
                     tunnel.send_to_client(message);
+                    // The stashed configurationDone answers only AFTER the
+                    // launch answer has reached the client — that answer is
+                    // what unblocks Zed's startup chain, and the client's
+                    // own configurationDone must not outrun the event that
+                    // makes the configuration genuinely done. A refused
+                    // launch answers it as a failure: the session is not
+                    // running, and a local success would be a lie.
+                    if let Some(stashed) = stashed_at_launch {
+                        tunnel.send_to_client(json!({
+                            "type": "response",
+                            "request_seq": stashed,
+                            "command": "configurationDone",
+                            "success": true,
+                            "body": {},
+                        }));
+                    } else if program_launch_answer && answered != Some(true) {
+                        if let Some(stashed) = tunnel
+                            .pending_config_done
+                            .lock()
+                            .expect("pending configDone lock poisoned")
+                            .take()
+                        {
+                            tunnel.error_response(
+                                stashed,
+                                "configurationDone",
+                                "the session launch failed",
+                            );
+                        }
+                    }
                     if let Some(reason) = refusal_reason {
                         if !tunnel.step_announced.swap(true, Ordering::SeqCst) {
                             tunnel.send_to_client(step_refusal_event(&client_command, &reason));
@@ -837,6 +1049,17 @@ fn end_session(tunnel: &Tunnel) -> ! {
         // A died-first child still answers the init law: the gate opens.
         tunnel.init_answered.store(true, Ordering::SeqCst);
     }
+    // A configurationDone still stashed for a launch that will never be
+    // answered (the adapter died mid-session) rides the same no-hanging-
+    // request law as the two drains above.
+    if let Some(seq) = tunnel
+        .pending_config_done
+        .lock()
+        .expect("pending configDone lock poisoned")
+        .take()
+    {
+        tunnel.error_response(seq, "configurationDone", "the session ended before the launch answered");
+    }
 
     let reported_exit_code = exit_code.unwrap_or(-1);
     if tunnel.program_session.load(Ordering::SeqCst) && reported_exit_code != 0 {
@@ -909,6 +1132,47 @@ fn error_response_frame(request_seq: i64, command: &str, message: &str) -> Value
     })
 }
 
+/// The attach/test lane's benign configurationDone E_FAIL, answered in
+/// place. netcoredbg 3.2.0-1092 attached to an already-running testhost
+/// resumes on the attach itself; the client's `configurationDone` then
+/// aims its resume at a session that is already running and is refused
+/// with `Failed command 'configurationDone' : 0x80004005` (live defect
+/// 2026-10-22, xvcase engine log 01:02). The refusal is benign on this
+/// lane — the same log proves every breakpoint verified on module load,
+/// both breaks hit, and Zed stepped the debuggee — but Zed marks the
+/// request failed and the owner sees a dead debugger (`Tried to launch
+/// debugger with: ... error: transport shutdown`). The rewrite is the
+/// narrowest signature available: the client's own command, a failed
+/// answer, and that one error code. A program session's
+/// configurationDone failure is genuine (its debuggee never ran) and the
+/// frame is left untouched there. Returns true when the frame was
+/// rewritten, so the caller can log the answer under its own gate.
+fn answer_benign_attach_config_done(
+    message: &mut Value,
+    client_command: &str,
+    program_session: bool,
+) -> bool {
+    if client_command != "configurationDone" || program_session {
+        return false;
+    }
+    if message.get("success").and_then(Value::as_bool) != Some(false) {
+        return false;
+    }
+    if !message
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|m| m.contains("0x80004005"))
+    {
+        return false;
+    }
+    message["success"] = json!(true);
+    message["body"] = json!({});
+    if let Some(obj) = message.as_object_mut() {
+        obj.remove("message");
+    }
+    true
+}
+
 /// Run the relay on the process's own stdio until the client hangs up.
 pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
     if let Some(guidance) = &spec.missing_reason {
@@ -959,12 +1223,14 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
         init_answered: AtomicBool::new(false),
         step_announced: AtomicBool::new(false),
         configuration_done: AtomicBool::new(false),
+        pending_config_done: Mutex::new(None),
         test_settle: Mutex::new(None),
         out_seq: AtomicI64::new(0),
         child_seq: AtomicI64::new(0),
         runner: crate::runner::RunnerConfig::from_env(),
         tree: crate::runner::TreeRegistry::default(),
         program_session: AtomicBool::new(false),
+        runner_launch_pending: AtomicBool::new(false),
         adapter_tree: crate::runner::TreeRegistry::default(),
         log: proxy_log,
     });
@@ -1087,6 +1353,14 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
                                     // forwarded as it always was.
                                     LaunchMode::Test => match tunnel.runner {
                                         Some(runner) => {
+                                            // The stash window opens here,
+                                            // on the read loop, before the
+                                            // runner's worker thread exists:
+                                            // the configurationDone that
+                                            // rides in behind the launch
+                                            // must meet an armed window no
+                                            // matter how the threads race.
+                                            tunnel.note_runner_launch_pending();
                                             crate::runner::start(
                                                 Arc::clone(&tunnel),
                                                 runner,
@@ -1187,6 +1461,46 @@ pub fn serve(spec: AdapterSpec, sink: Box<dyn RelaySink>) -> io::Result<()> {
                                 "success": true,
                                 "body": {},
                             }));
+                        } else if tunnel.program_session.load(Ordering::SeqCst)
+                            || tunnel.runner_launch_pending.load(Ordering::SeqCst)
+                        {
+                            // Pre-launch STASH (live defect 2026-10-21,
+                            // walkthrough finding 3b): Zed does not wait for
+                            // the launch answer before sending
+                            // configurationDone, and netcoredbg — which
+                            // buffers configDone pre-ATTACH — does NOT
+                            // buffer it pre-LAUNCH: the early frame is what
+                            // makes its launch answer `Command execution
+                            // timed out.` while the debuggee still runs
+                            // (owner's engine log: the frame reached the
+                            // adapter BEFORE the launch was even forwarded,
+                            // during the runner's build window). Both
+                            // program windows therefore forbid forwarding:
+                            // the decided program session, and the runner's
+                            // undecided pre-decision window. The pump's
+                            // launch-correlation arm releases a program
+                            // stash (resume synthesized to the adapter,
+                            // launch answer to the client, then this seq
+                            // answered locally); `runner_lane_decided`
+                            // releases the rendezvous one pre-attach. The
+                            // build window tolerates the UNANSWERED request
+                            // for its duration (forwarding early is what
+                            // timed the launch out) — but it is not free
+                            // forever: Zed's initialize_sequence keeps its
+                            // request in flight, and an answer that never
+                            // reaches its request_seq ends the whole boot
+                            // sequence in a transport-shutdown error over a
+                            // passed run (owner round 5, 2026-10-22 — cured
+                            // in `runner_lane_decided`, pinned by
+                            // `a_stashed_configuration_done_is_answered_to_
+                            // the_clients_own_seq_after_release`).
+                            *tunnel
+                                .pending_config_done
+                                .lock()
+                                .expect("pending configDone lock poisoned") = Some(client_seq);
+                            if let Some(log) = &tunnel.log {
+                                log.note("relay: client configurationDone stashed (program session, pre-launch)");
+                            }
                         } else if tunnel.forward_to_child(&message).is_err() {
                             adapter_lost();
                         }
@@ -1309,5 +1623,83 @@ mod exit_law_tests {
         let output = event["body"]["output"].as_str().expect("output text");
         assert!(output.contains('3'), "the code must be named: {output}");
         assert!(output.ends_with('\n'), "a DAP output chunk is line-terminated");
+    }
+}
+
+#[cfg(test)]
+mod benign_config_done_tests {
+    use super::*;
+
+    /// The adapter's refusal byte-for-byte as the 2026-10-22 xvcase engine
+    /// log recorded it — the fixture is wire-verbatim, not a paraphrase.
+    fn refused_configuration_done() -> Value {
+        json!({
+            "type": "response",
+            "seq": 42,
+            "request_seq": 7,
+            "command": "configurationDone",
+            "success": false,
+            "message": "Failed command 'configurationDone' : 0x80004005",
+            "body": {},
+        })
+    }
+
+    #[test]
+    fn the_attach_lane_refusal_is_answered_as_success_with_the_engine_log_message() {
+        let mut frame = refused_configuration_done();
+        assert!(
+            answer_benign_attach_config_done(&mut frame, "configurationDone", false),
+            "the exact engine refusal on the attach/test lane must be rewritten"
+        );
+        assert_eq!(frame["success"], json!(true));
+        assert_eq!(frame["body"], json!({}));
+        assert!(frame.get("message").is_none(), "a success carries no refusal text");
+        // Correlation fields ride untouched — the pump rewrites request_seq
+        // and command to the client's own numbering after this helper runs.
+        assert_eq!(frame["type"], "response");
+        assert_eq!(frame["request_seq"], json!(7));
+        assert_eq!(frame["command"], "configurationDone");
+    }
+
+    #[test]
+    fn a_program_session_configurationDone_failure_is_never_rewritten() {
+        // A program session's refusal is genuine: its debuggee never ran.
+        let mut frame = refused_configuration_done();
+        assert!(
+            !answer_benign_attach_config_done(&mut frame, "configurationDone", true),
+            "the program lane's failure must reach the client untouched"
+        );
+        assert_eq!(frame, refused_configuration_done());
+    }
+
+    #[test]
+    fn other_failed_responses_and_other_failures_of_the_same_command_pass_through() {
+        // Same error code, different command (the step refusal law owns
+        // those frames, and the user must see a real refusal).
+        let mut step = refused_configuration_done();
+        step["command"] = json!("next");
+        let step_before = step.clone();
+        assert!(
+            !answer_benign_attach_config_done(&mut step, "next", false),
+            "a refused step is the client's truth, not a benign resume refusal"
+        );
+        assert_eq!(step, step_before);
+
+        // Same command, a failure without the benign error code.
+        let mut other = refused_configuration_done();
+        other["message"] = json!("the session launch failed");
+        let other_before = other.clone();
+        assert!(
+            !answer_benign_attach_config_done(&mut other, "configurationDone", false),
+            "only the 0x80004005 resume-on-running signature is rewritten"
+        );
+        assert_eq!(other, other_before);
+
+        // A success needs no rewrite.
+        let mut ok = refused_configuration_done();
+        ok["success"] = json!(true);
+        let ok_before = ok.clone();
+        assert!(!answer_benign_attach_config_done(&mut ok, "configurationDone", false));
+        assert_eq!(ok, ok_before);
     }
 }

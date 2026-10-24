@@ -25,6 +25,10 @@ pub(crate) mod logging;
 // prefixes for the Macs the release matrix cannot ship an asset for —
 // Intel (no upstream build exists) and degraded Apple-Silicon sessions.
 pub mod macos_netcoredbg;
+// xunit v3 / MTP single-case selection (XUNIT-V3-MTP): enumerate the built
+// test dll, match a gutter row to its unique id, hand back the `-id` argv.
+// Shared by the Run CLI and the MTP debug lane; internal, nothing external.
+pub(crate) mod mtp_case;
 // The programrunner arm (LOC-0124, DR-5): project-mode launches ride the
 // relay raw — no build, no test step. Internal: the dispatch decision is
 // made in the relay's launch arm, nothing drives this module directly.
@@ -33,6 +37,9 @@ pub(crate) mod program;
 // directly — the filter the runner puts on argv is the filter under test.
 pub mod runner;
 pub mod relay;
+// The plain-Run lane CLI (XUNIT-V3-MTP): driven only by the `run-case`
+// argv branch in main, never by the DAP relay. Internal.
+pub(crate) mod runcli;
 pub mod session;
 
 use std::process::ExitCode;
@@ -46,4 +53,11 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Entry for `main`'s `run-case` branch: the plain-Run lane, one gutter
+/// case row per process, stdio to the Run tab, dotnet's exit code passed
+/// through.
+pub fn run_case() -> ExitCode {
+    runcli::run_from_env()
 }

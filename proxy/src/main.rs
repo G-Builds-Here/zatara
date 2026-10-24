@@ -75,5 +75,14 @@ fn hide_child_windows() {}
 
 fn main() -> ExitCode {
     hide_child_windows();
+    // Two lanes, one binary: the DAP adapter (default, spawned by Zed's
+    // debug host) and the plain-Run CLI (`zatara-proxy run-case`, spawned
+    // by the generic Run templates' launcher — the row's identity arrives
+    // as ZED_CUSTOM_csharp_* capture env, see runcli). The branch is argv
+    // before anything touches stdio, so the adapter lane's pipes are
+    // untouched by the check.
+    if std::env::args().nth(1).as_deref() == Some("run-case") {
+        return zatara_proxy::run_case();
+    }
     zatara_proxy::run()
 }

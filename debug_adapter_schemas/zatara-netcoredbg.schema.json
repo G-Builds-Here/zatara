@@ -58,6 +58,16 @@
           "items": { "type": "string" },
           "description": "The invoked method's parameter names, zipped with caseArguments to rebuild the named-argument display. Optional."
         },
+        "caseStringSlots": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Optional, default empty. 1-based indices of the caseArguments slots whose InlineData argument is a string literal. A string slot is matched by its bare content (quotes never survive the filter transport); primitive slots match as '<param>: <value>'. Empty or absent means the classic all-primitives zip."
+        },
+        "caseRawArguments": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional, default empty. The InlineData values as written in source - a string slot WITH its quotes - one per slot, shipped by the generic per-arity gutter tasks. A value beginning with a double quote marks that slot's string lane; the proxy derives caseStringSlots from it when caseStringSlots is absent or empty."
+        },
         "program": {
           "type": "string",
           "description": "Program mode: the dll or apphost to debug. Its presence selects the program lane and releases the config from the test-lane keys."

@@ -1,0 +1,11 @@
+[
+  {
+    "label": "zatara: discover from solution root",
+    "adapter": "zatara-netcoredbg",
+    "config": {
+      "projectPath": "C:/work/app",
+      "cwd": "C:/work/app",
+      "request": "launch"
+    }
+  }
+]

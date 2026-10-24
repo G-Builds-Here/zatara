@@ -56,6 +56,13 @@
 //!   trailing newline, byte-for-byte — then keep serving: the shape of a
 //!   debuggee's raw stdout arriving over the wire as DAP output events
 //!   (LOC-0133's measured event sequence).
+//! - `FAKE_DEBUGGEE_STARTUP_MS=<n>`  — model netcoredbg's debuggee-startup
+//!   window: a `launch` is answered only <n> ms after it arrives, and a
+//!   `configurationDone` that lands BEFORE the launch was answered makes the
+//!   in-flight launch be answered `success:false "Command execution timed
+//!   out."` — the measured real-adapter race (engine-log evidence
+//!   2026-10-21, walkthrough finding 3b): netcoredbg buffers
+//!   `configurationDone` pre-attach but NOT pre-launch.
 //!
 //! Adapter argv honored (netcoredbg fidelity — LOC-0117):
 //! - `--engineLogging=<file>`       — real netcoredbg dumps the full DAP
@@ -131,6 +138,10 @@ fn write_frame(out: &mut impl Write, message: &Value) {
 /// a single-threaded fake's always did).
 static SEQ: AtomicI64 = AtomicI64::new(0);
 static WIRE: std::sync::OnceLock<std::sync::Mutex<Wire>> = std::sync::OnceLock::new();
+/// The launch whose answer the startup window (FAKE_DEBUGGEE_STARTUP_MS)
+/// is still holding: the window's timer thread answers it, unless the race
+/// arm takes it first and answers it as a timed-out failure.
+static PENDING_LAUNCH: std::sync::Mutex<Option<i64>> = std::sync::Mutex::new(None);
 
 struct Wire {
     engine_log: Option<std::fs::File>,
@@ -287,6 +298,7 @@ fn main() {
     // unsteppable frame. Modeled so the relay's refusal announcement has
     // an adapter to announce about.
     let refuse_step = env::var("FAKE_REFUSE_STEP").unwrap_or_default();
+    let startup_ms = env::var("FAKE_DEBUGGEE_STARTUP_MS").unwrap_or_default();
     let mut attached_pid: Option<u32> = None;
 
     while let Some(msg) = read_frame(&mut reader).expect("fake adapter: framing error") {
@@ -320,6 +332,51 @@ fn main() {
                 "message": format!("Failed command '{command}' : 0x80004005"),
             }));
             continue;
+        }
+
+        // The debuggee-startup window (FAKE_DEBUGGEE_STARTUP_MS): the
+        // launch answer rides a wall-clock window like the real adapter's
+        // debuggee start, and a configurationDone landing while the window
+        // is open is the measured race — netcoredbg closes the in-flight
+        // launch as a timed-out failure (engine-log evidence 2026-10-21,
+        // walkthrough 3b). A configurationDone that arrives only after the
+        // window closed rides the normal path.
+        if !startup_ms.is_empty() {
+            if command == "launch" {
+                let window: u64 = startup_ms
+                    .parse()
+                    .expect("FAKE_DEBUGGEE_STARTUP_MS must be milliseconds");
+                *PENDING_LAUNCH
+                    .lock()
+                    .expect("fake adapter: pending-launch lock poisoned") = Some(request_seq);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(window));
+                    if let Some(seq) = PENDING_LAUNCH
+                        .lock()
+                        .expect("fake adapter: pending-launch lock poisoned")
+                        .take()
+                    {
+                        wire_emit(&mut json!({
+                            "type": "response", "request_seq": seq,
+                            "command": "launch", "success": true, "body": {},
+                        }));
+                    }
+                });
+                continue;
+            }
+            if command == "configurationDone" {
+                if let Some(seq) = PENDING_LAUNCH
+                    .lock()
+                    .expect("fake adapter: pending-launch lock poisoned")
+                    .take()
+                {
+                    wire_emit(&mut json!({
+                        "type": "response", "request_seq": seq,
+                        "command": "launch", "success": false,
+                        "message": "Command execution timed out.",
+                    }));
+                }
+            }
         }
 
         let body: Value = if !echo_args.is_empty() && echo_args == command {

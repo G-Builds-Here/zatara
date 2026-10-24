@@ -1,0 +1,8 @@
+[
+  {
+    "label": "zatara: build App (debug)",
+    "command": "dotnet",
+    "args": ["build", "src/App/App.csproj"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

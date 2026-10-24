@@ -45,3 +45,10 @@ zed_extension_api = "0.7.0"
 # proxy reads — one definition, so a rename on one side cannot pass silently
 # on the other (SCHEMA_EQ law, same as LaunchConfig).
 zatara-types = { path = "zatara-types" }
+# runnables_queries: compile the shipped C# query with the same grammar family
+# Zed loads (tree-sitter 0.25 / c-sharp 0.23 — the versions the 2026-10-21
+# offline probe reproduced Zed's Impossible-pattern failure with). Dev-only:
+# the wasm cdylib never sees these; Zed builds the extension, cargo test does not.
+tree-sitter = "0.25"
+tree-sitter-c-sharp = "0.23"
+streaming-iterator = "0.1"

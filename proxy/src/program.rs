@@ -100,6 +100,16 @@ pub(crate) fn start(tunnel: Arc<Tunnel>, config: &LaunchConfig, request: &Value,
                     fail(&tunnel, launch_seq, &not_found_failure(&root));
                     return;
                 }
+                // The xunit v3 / MTP repo: every Exe under the root runs
+                // tests, none is an app. The door says what it excluded
+                // and points at the lane that launches those very
+                // projects filtered (the runner's MTP debug lane), with
+                // the pin escape kept — a named `program` still debugs
+                // any of them directly.
+                Ok(Resolution::TestOnly { root, tests }) => {
+                    fail(&tunnel, launch_seq, &test_only_failure(&root, &tests));
+                    return;
+                }
                 Err(error) => {
                     fail(&tunnel, launch_seq, &error.to_string());
                     return;
@@ -155,6 +165,25 @@ fn not_found_failure(root: &Path) -> String {
     format!(
         "zatara: program debug needs a runnable app (exe) project, and none was found under {}. If this folder only holds tests, use the gutter run/debug buttons instead; to run a specific dll anyway, add a .zed/debug.json scenario whose \"program\" key is its path, e.g. \"program\": \"C:/path/to/Your.dll\".",
         root.display()
+    )
+}
+
+/// The tests-only-repo launch error (xunit v3 / MTP, 2026-10-20): the
+/// door excluded the test-shaped Exes and nothing app-shaped remained —
+/// so the message owns the exclusion (names every test project verbatim,
+/// never pretends the scan found nothing), points at the gutter lanes
+/// that launch these projects filtered, and keeps the pin escape the
+/// exclusion law leaves (`program` skips discovery entirely, DR-7). Same
+/// three obligations as [`not_found_failure`], different facts.
+fn test_only_failure(root: &Path, tests: &[PathBuf]) -> String {
+    format!(
+        "zatara: program debug needs a runnable app (exe) project; under {} every runnable (exe) project is a test project ({}), so the door excluded all of them. Use the gutter run/debug buttons on a test in one of these projects instead; to debug one of them anyway, add a .zed/debug.json scenario whose \"program\" key is its built dll, e.g. \"program\": \"C:/path/to/YourTests.dll\".",
+        root.display(),
+        tests
+            .iter()
+            .map(|candidate| candidate.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
@@ -256,6 +285,34 @@ mod hint_wiring_tests {
             text.contains(".zed/debug.json"),
             "the escape hatch must say WHERE the key lives; it said: {text}"
         );
+    }
+
+    /// The tests-only door answer (xunit v3 / MTP): every candidate it
+    /// excluded stays named verbatim (the verbatim-surfacing law — an
+    /// exclusion the user cannot see is a silent policy), the scanned
+    /// root stands named, the gutter lanes are offered, and the pin
+    /// escape keeps its quoted key and its file.
+    #[test]
+    fn the_tests_only_error_names_every_excluded_project_and_the_gutter_lane() {
+        let tests = vec![
+            PathBuf::from("C:/work/app\\tests\\V3\\V3.csproj"),
+            PathBuf::from("C:/work/app\\tests\\V3b\\V3b.csproj"),
+        ];
+        let text = test_only_failure(Path::new("C:/work/app"), &tests);
+        assert!(text.contains("C:/work/app"), "the scanned root stands named: {text}");
+        for candidate in &tests {
+            assert!(
+                text.contains(&candidate.display().to_string()),
+                "an exclusion must name what it excluded: {candidate:?} missing from {text}"
+            );
+        }
+        assert!(text.contains("test project"), "the exclusion must say what these are: {text}");
+        assert!(text.contains("gutter"), "the real lane must be offered: {text}");
+        assert!(
+            text.contains("\"program\""),
+            "the escape hatch must be shown as the quoted config key: {text}"
+        );
+        assert!(text.contains(".zed/debug.json"), "the escape must say WHERE: {text}");
     }
 
     #[test]

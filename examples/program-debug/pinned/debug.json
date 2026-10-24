@@ -1,0 +1,10 @@
+[
+  {
+    "label": "zatara: pinned program (App.dll)",
+    "adapter": "zatara-netcoredbg",
+    "config": {
+      "program": "bin/Debug/net9.0/App.dll",
+      "cwd": "src/App"
+    }
+  }
+]
