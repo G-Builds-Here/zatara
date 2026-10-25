@@ -6,7 +6,8 @@ use zed_extension_api::{
 };
 use zatara_types::{NETCOREDBG_ARG, WORK_DIR_ENV};
 use crate::binary_manager::{
-    BinaryId, BinaryManager, FetchError, Fetcher, PlatformTarget, ReleaseSource, ResolveError,
+    BinaryId, BinaryManager, ExecMarker, FetchError, Fetcher, PlatformTarget, ReleaseSource,
+    ResolveError,
 };
 const RELEASE_REPO: &str = "G-Builds-Here/zatara";
 #[allow(unreachable_patterns)]
@@ -128,11 +129,17 @@ pub fn dap_binary_for(
     let fetcher = ExtensionHttpFetcher;
     let (host_os, host_arch) = current_platform();
     let host_target = target_for(host_os, host_arch);
+    let exec_marker = if matches!(host_target, PlatformTarget::WinX64) {
+        HostExecMarker::Noop
+    } else {
+        HostExecMarker::Chmod
+    };
     let manager = BinaryManager {
         work_dir,
         target: host_target,
         release_source: ReleaseSource::github_latest(RELEASE_REPO),
         fetcher: &fetcher,
+        exec_marker: &exec_marker,
     };
     let proxy_override = user_provided_debug_adapter_path.map(Path::new);
     let name_netcoredbg = host_target != PlatformTarget::MacosX64;
@@ -215,6 +222,31 @@ impl Fetcher for ExtensionHttpFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let request = get_request(url).map_err(FetchError::Transport)?;
         request.fetch().map(|response| response.body).map_err(FetchError::Transport)
+    }
+}
+pub enum HostExecMarker {
+    Chmod,
+    Noop,
+}
+impl ExecMarker for HostExecMarker {
+    fn mark_executable(&self, path: &Path) -> Result<(), String> {
+        match self {
+            Self::Noop => Ok(()),
+            Self::Chmod => {
+                let output = zed_extension_api::process::Command::new("chmod")
+                    .arg("+x")
+                    .arg(path.to_string_lossy().into_owned())
+                    .output()?;
+                match output.status {
+                    Some(0) => Ok(()),
+                    other => Err(format!(
+                        "chmod +x status {:?}: {}",
+                        other,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )),
+                }
+            }
+        }
     }
 }
 #[cfg(test)]

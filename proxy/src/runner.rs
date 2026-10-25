@@ -777,6 +777,28 @@ fn fuzzy_armed(raw: Option<&str>) -> bool {
     raw == Some("1")
 }
 fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
+    if let Some(file) = gutter_file_from_env(&config) {
+        let claimed = Path::new(config.project_path.as_str());
+        let mut cursor = file.parent();
+        while let Some(ancestor) = cursor {
+            if let Some(project) = unique_project(ancestor) {
+                if project != claimed {
+                    eprintln!(
+                        "zatara: projectPath '{}' resolved to '{}' (walked up from the gutter file '{}')",
+                        config.project_path,
+                        project.display(),
+                        file.display()
+                    );
+                    config.project_path = project.display().to_string();
+                }
+                break;
+            }
+            if has_project_file(ancestor) {
+                break;
+            }
+            cursor = ancestor.parent();
+        }
+    }
     let path = Path::new(config.project_path.as_str());
     if path.is_file() {
         return;
@@ -1301,6 +1323,75 @@ mod tests {
         let mut config = config_naming(&real);
         resolve_project_path(&mut config);
         assert_eq!(config.project_path, real.display().to_string());
+    }
+    #[test]
+    fn a_nested_test_project_overrides_the_folder_twin_claim() {
+        let root = fs_temp("nested-twin");
+        let twin = root.join("Root.csproj");
+        let tests = root.join("Root.Tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(&twin, b"<Project/>").unwrap();
+        std::fs::write(&tests.join("Root.Tests.csproj"), b"<Project/>").unwrap();
+        let opened = tests.join("T.cs");
+        std::fs::write(&opened, b"//").unwrap();
+        let mut config = config_naming(&twin);
+        config.env = Some(std::collections::BTreeMap::from([(
+            "DOTNET_FILE".to_string(),
+            opened.display().to_string(),
+        )]));
+        resolve_project_path_with(&mut config, false);
+        assert_eq!(
+            config.project_path,
+            tests.join("Root.Tests.csproj").display().to_string(),
+            "the file-proven lane outranks the claim-untouched law: an \
+             existing but wrong folder-twin must not survive the walk"
+        );
+    }
+    #[test]
+    fn a_single_project_shape_keeps_its_claim_under_the_new_lane() {
+        let root = fs_temp("nested-single");
+        let claim = root.join("Root.csproj");
+        std::fs::write(&claim, b"<Project/>").unwrap();
+        let nested = root.join("Tests");
+        std::fs::create_dir_all(&nested).unwrap();
+        let opened = nested.join("T.cs");
+        std::fs::write(&opened, b"//").unwrap();
+        let mut config = config_naming(&claim);
+        config.env = Some(std::collections::BTreeMap::from([(
+            "DOTNET_FILE".to_string(),
+            opened.display().to_string(),
+        )]));
+        resolve_project_path_with(&mut config, false);
+        assert_eq!(
+            config.project_path,
+            claim.display().to_string(),
+            "the walk up from the gutter file names the claimed project \
+             itself — nothing moves"
+        );
+    }
+    #[test]
+    fn a_tie_above_the_gutter_file_never_overrides_a_claim() {
+        let root = fs_temp("nested-tie");
+        let tied = root.join("tied");
+        std::fs::create_dir_all(&tied).unwrap();
+        std::fs::write(&tied.join("A.csproj"), b"<Project/>").unwrap();
+        std::fs::write(&tied.join("B.csproj"), b"<Project/>").unwrap();
+        std::fs::write(&root.join("Root.csproj"), b"<Project/>").unwrap();
+        let opened = tied.join("T.cs");
+        std::fs::write(&opened, b"//").unwrap();
+        let claim = tied.join("A.csproj");
+        let mut config = config_naming(&claim);
+        config.env = Some(std::collections::BTreeMap::from([(
+            "DOTNET_FILE".to_string(),
+            opened.display().to_string(),
+        )]));
+        resolve_project_path_with(&mut config, false);
+        assert_eq!(
+            config.project_path,
+            claim.display().to_string(),
+            "a tie on the way up is a refusal, not a cue to keep walking \
+             and adopt some ancestor's project over the held claim"
+        );
     }
     #[test]
     fn a_directory_with_one_project_becomes_that_project() {

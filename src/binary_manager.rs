@@ -200,11 +200,15 @@ impl std::error::Error for ResolveError {
         }
     }
 }
+pub trait ExecMarker {
+    fn mark_executable(&self, path: &Path) -> Result<(), String>;
+}
 pub struct BinaryManager<'f> {
     pub work_dir: PathBuf,
     pub target: PlatformTarget,
     pub release_source: ReleaseSource,
     pub fetcher: &'f dyn Fetcher,
+    pub exec_marker: &'f dyn ExecMarker,
 }
 impl<'f> BinaryManager<'f> {
     pub fn resolve(
@@ -233,6 +237,7 @@ impl<'f> BinaryManager<'f> {
                     actual,
                 });
             }
+            self.mark_executable(&cache_path);
             eprintln!("[zatara] cache hit: {} (verified, no download)", asset.name);
             return Ok(ResolvedBinary {
                 path: cache_path,
@@ -253,6 +258,7 @@ impl<'f> BinaryManager<'f> {
             });
         }
         self.place_in_cache(&cache_path, &bytes)?;
+        self.mark_executable(&cache_path);
         Ok(ResolvedBinary {
             path: cache_path,
             source: ResolvedSource::Downloaded,
@@ -293,7 +299,19 @@ impl<'f> BinaryManager<'f> {
                         })
             })
             .collect();
-        pick_newest_cached(&hits, binary.prefix(), &needle)
+        let winner = pick_newest_cached(&hits, binary.prefix(), &needle)?;
+        self.mark_executable(&winner);
+        Some(winner)
+    }
+    fn mark_executable(&self, path: &Path) {
+        if let Err(e) = self.exec_marker.mark_executable(path) {
+            eprintln!(
+                "[zatara] could not mark {} executable ({e}) — if the spawn \
+                 reports Permission denied, run: chmod +x \"{}\"",
+                path.display(),
+                path.display()
+            );
+        }
     }
 }
 fn pick_newest_cached(paths: &[PathBuf], prefix: &str, needle: &str) -> Option<PathBuf> {
