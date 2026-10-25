@@ -1,7 +1,7 @@
 id = "zatara-netcoredbg"
 name = "Zatara .NET"
 description = "Run and debug .NET tests from the Zed gutter via a netcoredbg DAP proxy."
-version = "0.1.3"
+version = "0.1.4"
 schema_version = 1
 authors = ["G-Builds-Here"]
 repository = "https://github.com/G-Builds-Here/zatara"
