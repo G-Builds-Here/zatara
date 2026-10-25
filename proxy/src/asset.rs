@@ -167,6 +167,9 @@ fn unzip_flat<R: Read + Seek>(
         let Some(base) = Path::new(entry.name()).file_name() else {
             continue;
         };
+        if is_resource_fork(entry.name(), base) {
+            continue;
+        }
         #[cfg(unix)]
         let program_member = base == std::path::Path::new(MEMBER_NAME);
         let mut out = fs::File::create(part_dir.join(base))?;
@@ -179,6 +182,9 @@ fn unzip_flat<R: Read + Seek>(
         }
     }
     Ok(())
+}
+fn is_resource_fork(name: &str, base: &std::ffi::OsStr) -> bool {
+    base.to_string_lossy().starts_with("._") || name.split(|c| c == '/' || c == '\\').any(|part| part == "__MACOSX")
 }
 fn stream_member<R: Read, W: Write>(reader: R, out: &mut W) -> io::Result<bool> {
     let mut tar = flate2::read::MultiGzDecoder::new(reader);
@@ -393,6 +399,33 @@ mod tests {
             fs::remove_file(&archive).unwrap();
             assert_eq!(materialize(&archive).unwrap(), program);
         }
+    }
+    #[test]
+    fn a_macos_zip_keeps_apple_double_resource_forks_out_of_the_cache() {
+        let dir = temp_dir("zipforks");
+        let macho = b"\xCF\xFA\xED\xFE fake netcoredbg Mach-O".to_vec();
+        let archive = dir.join("netcoredbg-3.2.0-1092-macos-arm64.zip");
+        fs::write(
+            &archive,
+            zip_bytes(&[
+                ("netcoredbg/._netcoredbg", b"AppleDouble header".as_slice()),
+                ("netcoredbg/__MACOSX/._ThirdPartyNotices.txt", b"fork".as_slice()),
+                ("netcoredbg/ThirdPartyNotices.txt", b"notices".as_slice()),
+                ("netcoredbg/netcoredbg", &macho),
+            ]),
+        )
+        .unwrap();
+        let program = materialize(&archive).expect("the zip materializes with its forks skipped");
+        assert_eq!(fs::read(&program).unwrap(), macho, "the real program still wins");
+        let unpacked = program.parent().unwrap();
+        assert!(unpacked.join("ThirdPartyNotices.txt").is_file(), "real members still land");
+        let forks: Vec<String> = fs::read_dir(unpacked)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("._") || name == "__MACOSX")
+            .collect();
+        assert!(forks.is_empty(), "no AppleDouble junk reaches the cache: {forks:?}");
     }
     #[test]
     fn a_malformed_zip_names_the_archive_and_litters_nothing() {
