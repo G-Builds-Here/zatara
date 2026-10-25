@@ -295,6 +295,16 @@ impl Tunnel {
         self.runner_launch_pending.store(true, Ordering::SeqCst);
     }
     pub(crate) fn runner_lane_decided(&self, mtp_lane: bool) {
+        // The pinned macOS netcoredbg (3.2.0-1092, live probe 2026-10-25)
+        // refuses every attach that follows an answered configurationDone
+        // (E_FAIL). On the macOS vstest lane both the pending flag and the
+        // stashed request therefore hold until the attach answer: the child
+        // pump forwards the stash post-attach and clears the flag there.
+        // Windows and Linux take this pre-attach rendezvous unchanged, and the
+        // MTP lane launches the program in the engine, never attaching.
+        if !mtp_lane && cfg!(target_os = "macos") {
+            return;
+        }
         self.runner_launch_pending.store(false, Ordering::SeqCst);
         if mtp_lane {
             return;
@@ -486,16 +496,40 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                 let correlated = child_seq
                     .and_then(|seq| tunnel.pending.lock().expect("pending map lock poisoned").remove(&seq));
                 if let Some(in_flight) = correlated {
-                    let resumed_now = matches!(in_flight.command.as_str(), "launch" | "attach")
-                        && message.get("command").and_then(Value::as_str) == Some("attach")
+                    let attach_answered = message.get("command").and_then(Value::as_str) == Some("attach")
+                        && matches!(in_flight.command.as_str(), "launch" | "attach");
+                    if attach_answered {
+                        tunnel.runner_launch_pending.store(false, Ordering::SeqCst);
+                    }
+                    let resumed_now = attach_answered
                         && message.get("success").and_then(Value::as_bool) == Some(true);
                     if resumed_now {
                         tunnel.configuration_done.store(true, Ordering::SeqCst);
-                        let _ = tunnel.forward_to_child_untracked(&json!({
-                            "type": "request",
-                            "command": "configurationDone",
-                            "arguments": {},
-                        }));
+                        let stashed = tunnel
+                            .pending_config_done
+                            .lock()
+                            .expect("pending configDone lock poisoned")
+                            .take();
+                        match stashed {
+                            Some(client_seq) => {
+                                if let Some(log) = &tunnel.log {
+                                    log.note("relay: stashed configurationDone forwarded (attach answered, post-attach rendezvous)");
+                                }
+                                let _ = tunnel.forward_to_child(&json!({
+                                    "type": "request",
+                                    "seq": client_seq,
+                                    "command": "configurationDone",
+                                    "arguments": {},
+                                }));
+                            }
+                            None => {
+                                let _ = tunnel.forward_to_child_untracked(&json!({
+                                    "type": "request",
+                                    "command": "configurationDone",
+                                    "arguments": {},
+                                }));
+                            }
+                        }
                     }
                     let program_launch_answer = matches!(in_flight.command.as_str(), "launch")
                         && message.get("command").and_then(Value::as_str) == Some("launch")

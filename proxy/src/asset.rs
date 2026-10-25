@@ -25,6 +25,18 @@ fn zip_target(archive: &Path) -> PathBuf {
 pub fn materialize(program: &Path) -> io::Result<PathBuf> {
     let target = extraction_target(program);
     if target.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&target)?;
+            let perms = metadata.permissions();
+            let mode = perms.mode() | 0o111;
+            if perms.mode() != mode {
+                let mut perms = perms;
+                perms.set_mode(mode);
+                fs::set_permissions(&target, perms)?;
+            }
+        }
         return Ok(target);
     }
     let target_zip = zip_target(program);
@@ -110,10 +122,15 @@ fn discard_tree(assets_dir: &Path, part_dir: &Path) {
 }
 fn materialize_zip(archive: &Path, file: fs::File, target: &Path) -> io::Result<PathBuf> {
     let stem_dir = target.parent().expect("zip_target always has a parent");
-    let assets_dir = stem_dir.parent().expect("extraction_dir always has a parent");
+    let assets_dir = stem_dir
+        .parent()
+        .expect("extraction_dir always has a parent");
     fs::create_dir_all(assets_dir)?;
-    let part_dir =
-        assets_dir.join(format!("{}.part-{}", stem_dir.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
+    let part_dir = assets_dir.join(format!(
+        "{}.part-{}",
+        stem_dir.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
     fs::create_dir_all(&part_dir)?;
     let unzip = zip::ZipArchive::new(file)
         .and_then(|mut entries| unzip_flat(&mut entries, &part_dir))
@@ -167,6 +184,9 @@ fn unzip_flat<R: Read + Seek>(
         let Some(base) = Path::new(entry.name()).file_name() else {
             continue;
         };
+        if is_resource_fork(entry.name(), base) {
+            continue;
+        }
         #[cfg(unix)]
         let program_member = base == std::path::Path::new(MEMBER_NAME);
         let mut out = fs::File::create(part_dir.join(base))?;
@@ -179,6 +199,9 @@ fn unzip_flat<R: Read + Seek>(
         }
     }
     Ok(())
+}
+fn is_resource_fork(name: &str, base: &std::ffi::OsStr) -> bool {
+    base.to_string_lossy().starts_with("._") || name.split(|c| c == '/' || c == '\\').any(|part| part == "__MACOSX")
 }
 fn stream_member<R: Read, W: Write>(reader: R, out: &mut W) -> io::Result<bool> {
     let mut tar = flate2::read::MultiGzDecoder::new(reader);
@@ -215,13 +238,13 @@ fn member_is_netcoredbg(header: &[u8; 512]) -> bool {
     } else {
         name.to_string()
     };
-    Path::new(&full)
-        .file_name()
-        .and_then(|n| n.to_str())
-        == Some(MEMBER_NAME)
+    Path::new(&full).file_name().and_then(|n| n.to_str()) == Some(MEMBER_NAME)
 }
 fn ascii_field(field: &[u8]) -> &str {
-    let end = field.iter().position(|&byte| byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(field.len());
     std::str::from_utf8(&field[..end]).unwrap_or_default()
 }
 fn tar_size(field: &[u8]) -> Option<u64> {
@@ -302,7 +325,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&program).unwrap().permissions().mode();
-            assert_ne!(mode & 0o111, 0, "extracted program must be executable: {mode:o}");
+            assert_ne!(
+                mode & 0o111,
+                0,
+                "extracted program must be executable: {mode:o}"
+            );
         }
         assert!(archive.is_file());
     }
@@ -330,7 +357,9 @@ mod tests {
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         for (name, content) in entries {
-            writer.start_file((*name).to_string(), options).expect("start member");
+            writer
+                .start_file((*name).to_string(), options)
+                .expect("start member");
             writer.write_all(content).expect("write member");
         }
         writer.finish().expect("finish zip").into_inner()
@@ -353,10 +382,17 @@ mod tests {
         assert_eq!(program, zip_target(&archive));
         assert_eq!(fs::read(&program).unwrap(), exe);
         assert!(program.parent().unwrap().join("ManagedPart.dll").is_file());
-        assert!(program.parent().unwrap().join("ThirdPartyNotices.txt").is_file());
+        assert!(program
+            .parent()
+            .unwrap()
+            .join("ThirdPartyNotices.txt")
+            .is_file());
         assert!(archive.is_file());
         fs::remove_file(&archive).unwrap();
-        assert_eq!(materialize(&dir.join("netcoredbg-3.2.0-1092-win-x64.zip")).unwrap(), program);
+        assert_eq!(
+            materialize(&dir.join("netcoredbg-3.2.0-1092-win-x64.zip")).unwrap(),
+            program
+        );
     }
     #[test]
     fn a_macos_arm64_zip_materializes_the_unix_binary_executable() {
@@ -374,25 +410,78 @@ mod tests {
         let program = materialize(&archive).expect("the macOS arm64 zip materializes");
         assert_eq!(
             program,
-            dir.join(ASSET_DIR).join("netcoredbg-3.2.0-1092-macos-arm64").join("netcoredbg"),
+            dir.join(ASSET_DIR)
+                .join("netcoredbg-3.2.0-1092-macos-arm64")
+                .join("netcoredbg"),
         );
         assert_eq!(fs::read(&program).unwrap(), macho);
-        assert!(program.parent().unwrap().join("ThirdPartyNotices.txt").is_file());
+        assert!(program
+            .parent()
+            .unwrap()
+            .join("ThirdPartyNotices.txt")
+            .is_file());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&program).unwrap().permissions().mode();
-            assert_ne!(mode & 0o111, 0, "the unix program must be executable: {mode:o}");
+            assert_ne!(
+                mode & 0o111,
+                0,
+                "the unix program must be executable: {mode:o}"
+            );
             let sibling = program.parent().unwrap().join("ThirdPartyNotices.txt");
-            assert_eq!(fs::metadata(&sibling).unwrap().permissions().mode() & 0o111, 0,
-                "only the program member gets the exec bit");
+            assert_eq!(
+                fs::metadata(&sibling).unwrap().permissions().mode() & 0o111,
+                0,
+                "only the program member gets the exec bit"
+            );
         }
-        assert!(archive.is_file(), "the cache entry keeps its verified bytes");
+        assert!(
+            archive.is_file(),
+            "the cache entry keeps its verified bytes"
+        );
         #[cfg(unix)]
         {
             fs::remove_file(&archive).unwrap();
             assert_eq!(materialize(&archive).unwrap(), program);
         }
+    }
+    #[test]
+    fn a_macos_zip_keeps_apple_double_resource_forks_out_of_the_cache() {
+        let dir = temp_dir("zipforks");
+        let macho = b"\xCF\xFA\xED\xFE fake netcoredbg Mach-O".to_vec();
+        let archive = dir.join("netcoredbg-3.2.0-1092-macos-arm64.zip");
+        fs::write(
+            &archive,
+            zip_bytes(&[
+                ("netcoredbg/._netcoredbg", b"AppleDouble header".as_slice()),
+                (
+                    "netcoredbg/__MACOSX/._ThirdPartyNotices.txt",
+                    b"fork".as_slice(),
+                ),
+                ("netcoredbg/ThirdPartyNotices.txt", b"notices".as_slice()),
+                ("netcoredbg/netcoredbg", &macho),
+            ]),
+        )
+        .unwrap();
+        let program = materialize(&archive).expect("the zip materializes with its forks skipped");
+        assert_eq!(
+            fs::read(&program).unwrap(),
+            macho,
+            "the real program still wins"
+        );
+        let unpacked = program.parent().unwrap();
+        assert!(unpacked.join("ThirdPartyNotices.txt").is_file(), "real members still land");
+        let forks: Vec<String> = fs::read_dir(unpacked)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("._") || name == "__MACOSX")
+            .collect();
+        assert!(
+            forks.is_empty(),
+            "no AppleDouble junk reaches the cache: {forks:?}"
+        );
     }
     #[test]
     fn a_malformed_zip_names_the_archive_and_litters_nothing() {
@@ -401,18 +490,31 @@ mod tests {
         fs::write(&archive, b"PK\x03\x04 no central directory here").unwrap();
         let err = materialize(&archive).expect_err("garbage zip must not yield a program");
         let msg = err.to_string();
-        assert!(msg.contains("netcoredbg-3.2.0-win-x64.zip"), "error names the archive: {msg}");
-        assert!(!zip_target(&archive).exists(), "nothing is published from a corrupt zip");
+        assert!(
+            msg.contains("netcoredbg-3.2.0-win-x64.zip"),
+            "error names the archive: {msg}"
+        );
+        assert!(
+            !zip_target(&archive).exists(),
+            "nothing is published from a corrupt zip"
+        );
         let leftovers: Vec<_> = fs::read_dir(dir.join(ASSET_DIR))
             .map(|rd| rd.collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(leftovers.is_empty(), "the part dir is cleaned: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "the part dir is cleaned: {leftovers:?}"
+        );
     }
     #[test]
     fn a_zip_without_the_exe_member_is_not_rewritten() {
         let dir = temp_dir("zipnomember");
         let archive = dir.join("netcoredbg-surprise.zip");
-        fs::write(&archive, zip_bytes(&[("share/readme.txt", b"hello".as_slice())])).unwrap();
+        fs::write(
+            &archive,
+            zip_bytes(&[("share/readme.txt", b"hello".as_slice())]),
+        )
+        .unwrap();
         assert_eq!(
             materialize(&archive).unwrap(),
             archive,
@@ -421,7 +523,10 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(dir.join(ASSET_DIR))
             .map(|rd| rd.collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(leftovers.is_empty(), "a memberless publish leaves no litter: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "a memberless publish leaves no litter: {leftovers:?}"
+        );
     }
     #[test]
     fn a_zip_member_path_is_ignored_only_its_basename_lands() {
@@ -440,7 +545,10 @@ mod tests {
         assert_eq!(program, zip_target(&archive));
         assert_eq!(fs::read(&program).unwrap(), payload);
         assert!(program.parent().unwrap().join("ManagedPart.dll").is_file());
-        assert!(!dir.join("usr").exists(), "claimed member paths stay fictional");
+        assert!(
+            !dir.join("usr").exists(),
+            "claimed member paths stay fictional"
+        );
     }
     #[test]
     fn a_gzip_without_a_netcoredbg_member_is_not_rewritten() {
@@ -459,7 +567,10 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(dir.join(ASSET_DIR))
             .map(|rd| rd.collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(leftovers.is_empty(), "failed extraction cleans its part file: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "failed extraction cleans its part file: {leftovers:?}"
+        );
     }
     #[test]
     fn nested_member_paths_match_by_basename() {
@@ -468,7 +579,10 @@ mod tests {
         let archive = dir.join("netcoredbg-3.2.0-linux-x64.tar.gz");
         fs::write(
             &archive,
-            tar_gz(&[("usr/local/bin/netcoredbg", &payload), ("netcoredbg.debug", b"decoy".as_slice())]),
+            tar_gz(&[
+                ("usr/local/bin/netcoredbg", &payload),
+                ("netcoredbg.debug", b"decoy".as_slice()),
+            ]),
         )
         .unwrap();
         let program = materialize(&archive).unwrap();
@@ -486,7 +600,11 @@ mod tests {
         let archive = dir.join("netcoredbg-3.2.0-linux-x64.tar.gz");
         fs::write(&archive, gz).unwrap();
         let program = materialize(&archive).expect("base-256 member extracts");
-        assert_eq!(fs::read(&program).unwrap(), payload, "full member, no truncation");
+        assert_eq!(
+            fs::read(&program).unwrap(),
+            payload,
+            "full member, no truncation"
+        );
     }
     #[test]
     fn a_malformed_gzip_names_the_archive_and_litters_nothing() {
@@ -495,8 +613,14 @@ mod tests {
         fs::write(&archive, [0x1f, 0x8b, 0xde, 0xad, 0xbe, 0xef]).unwrap();
         let err = materialize(&archive).expect_err("garbage gzip must not yield a program");
         let msg = err.to_string();
-        assert!(msg.contains("netcoredbg-3.2.0-linux-x64.tar.gz"), "error names the archive: {msg}");
-        assert!(!extraction_target(&archive).exists(), "nothing is published from a corrupt stream");
+        assert!(
+            msg.contains("netcoredbg-3.2.0-linux-x64.tar.gz"),
+            "error names the archive: {msg}"
+        );
+        assert!(
+            !extraction_target(&archive).exists(),
+            "nothing is published from a corrupt stream"
+        );
         let parts: Vec<_> = fs::read_dir(dir.join(ASSET_DIR))
             .map(|rd| rd.filter_map(Result::ok).collect::<Vec<_>>())
             .unwrap_or_default();
