@@ -1,0 +1,56 @@
+[
+    {
+        "label": "zatara dev: check",
+        "command": "make",
+        "args": ["check"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: build",
+        "command": "cargo",
+        "args": ["build", "--workspace"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: wasm",
+        "command": "make",
+        "args": ["wasm"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: test",
+        "command": "cargo",
+        "args": ["test", "--workspace"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: clippy",
+        "command": "cargo",
+        "args": ["clippy", "--workspace", "--all-targets"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: fmt-check",
+        "command": "cargo",
+        "args": ["fmt", "--all", "--", "--check"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: doctor",
+        "command": "make",
+        "args": ["doctor"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: release-check",
+        "command": "make",
+        "args": ["release-check"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+    {
+        "label": "zatara dev: clean",
+        "command": "make",
+        "args": ["clean"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+    },
+]
