@@ -19,18 +19,21 @@ pub struct Manifest {
 pub enum BinaryId {
     ZataraProxy,
     NetcoreDbg,
+    ZataraRunCase,
 }
 impl BinaryId {
     fn prefix(self) -> &'static str {
         match self {
             Self::ZataraProxy => "zatara-proxy-",
             Self::NetcoreDbg => "netcoredbg-",
+            Self::ZataraRunCase => "zatara-run-case-",
         }
     }
     fn label(self) -> &'static str {
         match self {
             Self::ZataraProxy => "zatara-proxy",
             Self::NetcoreDbg => "netcoredbg",
+            Self::ZataraRunCase => "zatara-run-case",
         }
     }
 }

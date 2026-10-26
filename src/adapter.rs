@@ -161,6 +161,14 @@ pub fn dap_binary_with(
         }
         Err(e) => return Err(e.to_string()),
     };
+    if proxy_override.is_none() && matches!(manager.target, PlatformTarget::WinX64) {
+        if let Err(e) = manager.resolve(BinaryId::ZataraRunCase, None) {
+            eprintln!(
+                "[zatara] run-case helper unavailable this session ({e}); row Run \
+                 keeps working through the launcher's buffered fallback"
+            );
+        }
+    }
     if !name_netcoredbg {
         return Ok(proxy_only_binary(&proxy, request_configuration, &manager.work_dir));
     }

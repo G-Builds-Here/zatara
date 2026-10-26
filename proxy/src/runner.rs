@@ -706,13 +706,17 @@ fn pid_descends_from(pid: u64, ancestor: u64) -> bool {
     }
     #[cfg(windows)]
     let parents = process_parent_map();
+    #[cfg(windows)]
+    let lookup = |current: u32| parents.as_ref().and_then(|map| map.get(&current).copied());
+    #[cfg(not(windows))]
+    let lookup = parent_of;
+    descends_via(pid, ancestor, lookup)
+}
+const TREE_WALK_BOUND: u32 = 64;
+fn descends_via(pid: u32, ancestor: u32, mut parent: impl FnMut(u32) -> Option<u32>) -> bool {
     let mut current = pid;
-    for _ in 0..64 {
-        #[cfg(windows)]
-        let parent = parents.as_ref().and_then(|map| map.get(&current).copied());
-        #[cfg(unix)]
-        let parent = parent_of(current);
-        match parent {
+    for _ in 0..TREE_WALK_BOUND {
+        match parent(current) {
             Some(p) if p == ancestor => return true,
             Some(0) => return false,
             Some(p) if p == current => return false,
@@ -763,11 +767,38 @@ fn process_parent_map() -> Option<std::collections::HashMap<u32, u32>> {
     }
     Some(parents)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn parent_of(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.rsplit_once(')')?.1;
     after_comm.split_whitespace().nth(1).and_then(|field| field.parse().ok())
+}
+#[cfg(target_os = "macos")]
+fn parent_of(pid: u32) -> Option<u32> {
+    #[link(name = "proc")]
+    extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut libc::proc_bsdinfo as *mut libc::c_void,
+            std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+        )
+    };
+    if rc <= 0 || info.pbi_pid != pid || info.pbi_ppid < 1 {
+        return None;
+    }
+    Some(info.pbi_ppid)
 }
 pub(crate) fn resolve_project_path(config: &mut LaunchConfig) {
     let fuzzy = fuzzy_armed(std::env::var("ZATARA_FUZZY_MATCH").ok().as_deref());
@@ -1855,6 +1886,61 @@ mod tests {
         assert!(!pid_descends_from(u64::MAX, own), "no platform numbers reach that high");
         let _ = child.kill();
         let _ = child.wait();
+    }
+    #[test]
+    fn the_tree_walk_stops_at_a_broken_link_a_cycle_and_the_bound() {
+        let chain = std::collections::HashMap::from([(4u32, 3u32), (3, 2), (2, 1)]);
+        assert!(
+            descends_via(4, 1, |current| chain.get(&current).copied()),
+            "a three hop chain reaches its root"
+        );
+        assert!(
+            !descends_via(4, 9, |current| chain.get(&current).copied()),
+            "a chain that never names the anchor is not that tree"
+        );
+        let cycle = std::collections::HashMap::from([(2u32, 3u32), (3, 2)]);
+        assert!(
+            !descends_via(2, 7, |current| cycle.get(&current).copied()),
+            "a parent cycle ends at the walk bound instead of spinning forever"
+        );
+        assert!(!descends_via(4, 1, |_| None), "a parent the OS cannot name is not in the tree");
+        assert!(
+            !descends_via(2, 1, |current| if current == 2 { Some(0) } else { None }),
+            "parent 0 is the tree floor: nothing descends through it"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_descends_through_a_parent_that_is_not_the_anchor() {
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a two level tree");
+        let shell_pid = shell.id();
+        let printed = {
+            use std::io::BufRead;
+            let pipe = shell.stdout.take().expect("stdout is piped");
+            let mut line = String::new();
+            std::io::BufReader::new(pipe)
+                .read_line(&mut line)
+                .expect("the grandchild pid is printed");
+            line
+        };
+        let grandchild: u32 = printed.trim().parse().expect("a pid on stdout");
+        assert!(
+            parent_of(grandchild).is_some_and(|parent| parent == shell_pid),
+            "the lookup names the direct parent, not the anchor"
+        );
+        assert!(
+            pid_descends_from(u64::from(grandchild), u64::from(std::process::id())),
+            "a grandchild is inside the launched tree the same way a test host is"
+        );
+        unsafe { libc::kill(grandchild as libc::pid_t, libc::SIGKILL) };
+        let _ = shell.kill();
+        let _ = shell.wait();
     }
     fn spawn_group_leader_sleeper() -> std::process::Child {
         let mut cmd = std::process::Command::new(if cfg!(windows) { "ping" } else { "sleep" });
