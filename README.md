@@ -102,9 +102,10 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   single method.
 - An xunit `[InlineData]` row **Run** is a Windows-shipping lane: the three
   per-arity "Run case" tasks in `languages/csharp/tasks.json` carry a
-  PowerShell command spawning the package-root launcher `run-case.cmd` (the
-  development workspace keeps it at `crates/zatara/run-case.cmd` and the
-  mirror ships it), which resolves the cached proxy and the console helper
+  PowerShell command spawning the package-root launcher
+  `zatara-run-case.cmd` (the development workspace keeps it at
+  `crates/zatara/zatara-run-case.cmd` and the mirror ships it), which
+  resolves the cached proxy and the console helper
   `zatara-run-case.exe` beside it. The helper is a release asset the
   extension fetches with the proxy, SHA256-verified against the pinned
   manifest; without it the launcher's buffered fallback still runs the row.
@@ -115,7 +116,29 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   On macOS and Linux this one task's command cannot resolve (Zed gives every
   task one command for every OS, the [Upstream gaps](#upstream-gaps) table
   row); there, the method's gutter arrow (the whole theory) is the row's Run
-  path.
+  path. The package also ships the launcher's unix twin
+  `zatara-run-case.sh` beside the batch twin: it is the payload a
+  user-configured mac/Linux task points at, and Zed's one-command physics
+  are the only reason it is not a shipped default.
+- mac/Linux users can bind that twin to the row gutter themselves, and the
+  mechanism is measured live (2026-10-26): a `tasks.json` task carrying the
+  same `tags` wins the gutter click over the contributed task, and every
+  `ZED_CUSTOM_csharp_*` capture arrives in its child process env. Copy the
+  `csharp-test-case-generic-N` task you need from the extension's
+  `languages/csharp/tasks.json` into your user or project `tasks.json`,
+  keep its `env` block and `tags` verbatim (the env block is the row's
+  identity; the tags are the binding), and replace only the `command`:
+
+  ```json
+  "command": "sh \"$HOME/Library/Application Support/Zed/extensions/installed/zatara-netcoredbg/zatara-run-case.sh\""
+  ```
+
+  Linux spelling: `$HOME/.local/share/zed/extensions/installed/...`, lower
+  case `zed` (upstream `paths.rs`: the data dir joins the lower case app
+  name there). A resolver script is the alternative when one tasks.json is
+  meant to serve every OS, but put the code in a file and pass its path:
+  code written inline in `args` dies in PowerShell's parser, whose quoting
+  the task transport cannot outrun (measured same day).
 - A row that contains strings carries case icons on every platform, filtered
   by the AND-substring law: every slot contributes one `&`-joined substring
   part, a string slot its bare content, a primitive slot `param: value`. A

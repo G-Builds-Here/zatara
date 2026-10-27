@@ -80,7 +80,7 @@
   },
   {
     "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1})",
-    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\zatara-run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
@@ -99,7 +99,7 @@
   },
   {
     "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_case_arg_2})",
-    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\zatara-run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
@@ -121,7 +121,7 @@
   },
   {
     "label": "Run case: ${ZED_CUSTOM_csharp_method_name}(${ZED_CUSTOM_csharp_case_arg_1}, ${ZED_CUSTOM_csharp_case_arg_2}, ${ZED_CUSTOM_csharp_case_arg_3})",
-    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\run-case.cmd\"",
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\zatara-run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",

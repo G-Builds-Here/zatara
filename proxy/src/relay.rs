@@ -537,13 +537,11 @@ fn pump_child(tunnel: Arc<Tunnel>, child_out: ChildStdout) {
                             .expect("pending configDone lock poisoned")
                             .take();
                         tunnel.configuration_done.store(true, Ordering::SeqCst);
-                        if stashed.is_some() {
-                            let _ = tunnel.forward_to_child_untracked(&json!({
-                                "type": "request",
-                                "command": "configurationDone",
-                                "arguments": {},
-                            }));
-                        }
+                        let _ = tunnel.forward_to_child_untracked(&json!({
+                            "type": "request",
+                            "command": "configurationDone",
+                            "arguments": {},
+                        }));
                         stashed
                     } else {
                         None
