@@ -675,8 +675,8 @@ landed.
 ## Support
 
 Zatara is free and open source, and it stays that way. If it has won back
-your time and you would like to fuel the next fix, a tip is kindly
-received:
+your time and you would like to fuel the next fix, snack money and token
+money are always welcome:
 
 - GitHub Sponsors: [github.com/sponsors/G-Builds-Here](https://github.com/sponsors/G-Builds-Here)
 - Cash App: [$GBuildsHere](https://cash.app/$GBuildsHere)
