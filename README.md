@@ -6,6 +6,28 @@ Run and debug .NET unit tests from the Zed editor gutter, powered by
 This README is the user's surface: what you need, how to install, how to use
 it, what you can configure, and what to do when a symptom appears.
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-3a915d?style=flat-square)](#license)
+[![Sponsor](https://img.shields.io/badge/sponsor-G--Builds--Here-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/G-Builds-Here)
+[![Cash App](https://img.shields.io/badge/Cash%20App-$GBuildsHere-00D632?style=flat-square&logo=cashapp&logoColor=white)](https://cash.app/$GBuildsHere)
+[![PayPal](https://img.shields.io/badge/PayPal-GBuildsHere-00457C?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/GBuildsHere)
+
+## Support
+
+Zatara is free and open source. If it has won back your time, snack money and
+token money are always welcome: $5, $10, $25, or whatever number you think the
+thing is actually worth.
+
+<p align="center">
+  <a href="https://github.com/sponsors/G-Builds-Here"><img src="https://img.shields.io/badge/Sponsor%20G--Builds--Here-EC4067?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub Sponsors"></a>
+  <a href="https://cash.app/$GBuildsHere"><img src="https://img.shields.io/badge/Cash%20App-$GBuildsHere-00D632?style=for-the-badge&logo=cashapp&logoColor=000000" alt="Send via Cash App"></a>
+  <a href="https://paypal.me/GBuildsHere"><img src="https://img.shields.io/badge/PayPal-GBuildsHere-00457C?style=for-the-badge&logo=paypal&logoColor=white" alt="Send via PayPal"></a>
+</p>
+
+GitHub Sponsors takes recurring as well as one-time support.
+
+Funding is what buys the evenings a stubborn bug needs. An issue filed, a bug
+reproduced, or a pull request buys them too.
+
 ## Requirements
 
 | Need | Detail |
@@ -671,19 +693,6 @@ landed.
   extension API, and the task/locator model the gutter actions ride on.
 - xunit, nunit, and mstest: the frameworks whose discovery and filter syntax
   the gutter actions speak.
-
-## Support
-
-Zatara is free and open source, and it stays that way. If it has won back
-your time and you would like to fuel the next fix, snack money and token
-money are always welcome:
-
-- GitHub Sponsors: [github.com/sponsors/G-Builds-Here](https://github.com/sponsors/G-Builds-Here)
-- Cash App: [$GBuildsHere](https://cash.app/$GBuildsHere)
-- PayPal: [paypal.me/GBuildsHere](https://paypal.me/GBuildsHere)
-
-Every path is optional, and nothing about the extension depends on one.
-An issue filed, a bug reproduced, or a pull request is support too.
 
 ## License
 
