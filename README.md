@@ -672,6 +672,19 @@ landed.
 - xunit, nunit, and mstest: the frameworks whose discovery and filter syntax
   the gutter actions speak.
 
+## Support
+
+Zatara is free and open source, and it stays that way. If it has won back
+your time and you would like to fuel the next fix, a tip is kindly
+received:
+
+- GitHub Sponsors: [github.com/sponsors/G-Builds-Here](https://github.com/sponsors/G-Builds-Here)
+- Cash App: [$GBuildsHere](https://cash.app/$GBuildsHere)
+- PayPal: [paypal.me/GBuildsHere](https://paypal.me/GBuildsHere)
+
+Every path is optional, and nothing about the extension depends on one.
+An issue filed, a bug reproduced, or a pull request is support too.
+
 ## License
 
 MIT
