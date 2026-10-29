@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use zed_extension_api::http_client::{HttpMethod, HttpRequest, RedirectPolicy};
-use zed_extension_api::{
-    Architecture, DebugAdapterBinary, DebugTaskDefinition, Os, StartDebuggingRequestArguments,
-    StartDebuggingRequestArgumentsRequest, current_platform,
-};
-use zatara_types::{NETCOREDBG_ARG, WORK_DIR_ENV};
 use crate::binary_manager::{
     BinaryId, BinaryManager, ExecMarker, FetchError, Fetcher, PlatformTarget, ReleaseSource,
     ResolveError,
+};
+use std::path::{Path, PathBuf};
+use zatara_types::{NETCOREDBG_ARG, WORK_DIR_ENV};
+use zed_extension_api::http_client::{HttpMethod, HttpRequest, RedirectPolicy};
+use zed_extension_api::{
+    current_platform, Architecture, DebugAdapterBinary, DebugTaskDefinition, Os,
+    StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
 };
 const RELEASE_REPO: &str = "G-Builds-Here/zatara";
 #[allow(unreachable_patterns)]
@@ -37,7 +37,12 @@ pub fn adapter_binary(
     request_configuration: String,
     work_dir: &Path,
 ) -> DebugAdapterBinary {
-    adapter_spec(&paths.proxy, proxy_arguments(paths), request_configuration, work_dir)
+    adapter_spec(
+        &paths.proxy,
+        proxy_arguments(paths),
+        request_configuration,
+        work_dir,
+    )
 }
 pub fn proxy_only_binary(
     proxy: &Path,
@@ -59,7 +64,10 @@ fn adapter_spec(
         envs: vec![(WORK_DIR_ENV.to_string(), work_dir.display().to_string())],
         cwd: None,
         connection: None,
-        request_args: StartDebuggingRequestArguments { configuration, request },
+        request_args: StartDebuggingRequestArguments {
+            configuration,
+            request,
+        },
     }
 }
 pub fn launch_request_shape(
@@ -99,10 +107,11 @@ pub fn scenario_config_peeled(config: &serde_json::Value) -> &serde_json::Value 
         }
     }
 }
-pub fn request_kind_of(
-    config: &serde_json::Value,
-) -> StartDebuggingRequestArgumentsRequest {
-    match scenario_config_peeled(config).get("request").and_then(serde_json::Value::as_str) {
+pub fn request_kind_of(config: &serde_json::Value) -> StartDebuggingRequestArgumentsRequest {
+    match scenario_config_peeled(config)
+        .get("request")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("attach") => StartDebuggingRequestArgumentsRequest::Attach,
         _ => StartDebuggingRequestArgumentsRequest::Launch,
     }
@@ -118,7 +127,10 @@ pub fn resolve_adapter_paths(
     let netcoredbg = manager
         .resolve(BinaryId::NetcoreDbg, netcoredbg_override)
         .map_err(|e| e.to_string())?;
-    Ok(AdapterPaths { proxy: proxy.path, netcoredbg: netcoredbg.path })
+    Ok(AdapterPaths {
+        proxy: proxy.path,
+        netcoredbg: netcoredbg.path,
+    })
 }
 pub fn dap_binary_for(
     config: &DebugTaskDefinition,
@@ -143,7 +155,12 @@ pub fn dap_binary_for(
     };
     let proxy_override = user_provided_debug_adapter_path.map(Path::new);
     let name_netcoredbg = host_target != PlatformTarget::MacosX64;
-    dap_binary_with(&manager, proxy_override, config.config.clone(), name_netcoredbg)
+    dap_binary_with(
+        &manager,
+        proxy_override,
+        config.config.clone(),
+        name_netcoredbg,
+    )
 }
 pub fn dap_binary_with(
     manager: &BinaryManager,
@@ -170,11 +187,18 @@ pub fn dap_binary_with(
         }
     }
     if !name_netcoredbg {
-        return Ok(proxy_only_binary(&proxy, request_configuration, &manager.work_dir));
+        return Ok(proxy_only_binary(
+            &proxy,
+            request_configuration,
+            &manager.work_dir,
+        ));
     }
     match manager.resolve(BinaryId::NetcoreDbg, None) {
         Ok(netcoredbg) => Ok(adapter_binary(
-            &AdapterPaths { proxy, netcoredbg: netcoredbg.path },
+            &AdapterPaths {
+                proxy,
+                netcoredbg: netcoredbg.path,
+            },
             request_configuration,
             &manager.work_dir,
         )),
@@ -229,7 +253,10 @@ pub fn get_request(url: &str) -> Result<HttpRequest, String> {
 impl Fetcher for ExtensionHttpFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let request = get_request(url).map_err(FetchError::Transport)?;
-        request.fetch().map(|response| response.body).map_err(FetchError::Transport)
+        request
+            .fetch()
+            .map(|response| response.body)
+            .map_err(FetchError::Transport)
     }
 }
 pub enum HostExecMarker {
@@ -241,17 +268,19 @@ impl ExecMarker for HostExecMarker {
         match self {
             Self::Noop => Ok(()),
             Self::Chmod => {
-                let output = zed_extension_api::process::Command::new("chmod")
-                    .arg("+x")
-                    .arg(path.to_string_lossy().into_owned())
-                    .output()?;
-                match output.status {
-                    Some(0) => Ok(()),
-                    other => Err(format!(
-                        "chmod +x status {:?}: {}",
-                        other,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )),
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+                    let mut perms = metadata.permissions();
+                    let mode = perms.mode() | 0o111;
+                    perms.set_mode(mode);
+                    std::fs::set_permissions(path, perms).map_err(|e| e.to_string())?;
+                    Ok(())
+                }
+                #[cfg(not(unix))]
+                {
+                    Ok(())
                 }
             }
         }
@@ -268,5 +297,36 @@ mod tests {
             "download requests must carry FollowAll, found {:?}",
             request.redirect_policy
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn host_exec_marker_chmod_makes_file_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("zatara_test_exec");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.bin");
+        std::fs::write(&path, b"data").expect("write");
+        let meta = std::fs::metadata(&path).expect("metadata");
+        assert_eq!(meta.permissions().mode() & 0o111, 0);
+        let marker = HostExecMarker::Chmod;
+        marker.mark_executable(&path).expect("mark");
+        let meta = std::fs::metadata(&path).expect("metadata");
+        assert_ne!(meta.permissions().mode() & 0o111, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+    #[test]
+    fn host_exec_marker_noop_succeeds() {
+        let marker = HostExecMarker::Noop;
+        let path = std::path::Path::new("/nonexistent");
+        assert!(marker.mark_executable(path).is_ok());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn host_exec_marker_chmod_errors_on_missing_file() {
+        let marker = HostExecMarker::Chmod;
+        let path = std::path::Path::new("/tmp/zatara_nonexistent_12345.bin");
+        let _ = std::fs::remove_file(path);
+        let err = marker.mark_executable(path).expect_err("should error");
+        assert!(!err.is_empty());
     }
 }

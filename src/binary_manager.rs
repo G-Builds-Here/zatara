@@ -1,8 +1,8 @@
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 pub const CACHE_DIR: &str = "binary-cache";
 pub const MANIFEST_ASSET: &str = "manifest.json";
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -118,7 +118,9 @@ pub struct ReleaseSource {
 }
 impl ReleaseSource {
     pub fn github_latest(repo: &str) -> Self {
-        Self { download_base: format!("https://github.com/{repo}/releases/latest/download") }
+        Self {
+            download_base: format!("https://github.com/{repo}/releases/latest/download"),
+        }
     }
     pub fn asset_url(&self, name: &str) -> String {
         format!("{}/{}", self.download_base.trim_end_matches('/'), name)
@@ -167,9 +169,17 @@ fn is_plain_file_name(name: &str) -> bool {
 pub enum ResolveError {
     Fetch(FetchError),
     ManifestParse(String),
-    NoAssetForTarget { binary: &'static str, target: String, candidates: Vec<String> },
+    NoAssetForTarget {
+        binary: &'static str,
+        target: String,
+        candidates: Vec<String>,
+    },
     UnsafeAssetName(String),
-    ChecksumMismatch { asset: String, expected: String, actual: String },
+    ChecksumMismatch {
+        asset: String,
+        expected: String,
+        actual: String,
+    },
     Cache(String),
 }
 impl fmt::Display for ResolveError {
@@ -177,12 +187,20 @@ impl fmt::Display for ResolveError {
         match self {
             Self::Fetch(e) => write!(f, "{e}"),
             Self::ManifestParse(e) => write!(f, "release manifest could not be parsed: {e}"),
-            Self::NoAssetForTarget { binary, target, candidates } => write!(
+            Self::NoAssetForTarget {
+                binary,
+                target,
+                candidates,
+            } => write!(
                 f,
                 "no {binary} asset for target {target} in the release manifest (candidates: {})",
                 candidates.join(", ")
             ),
-            Self::ChecksumMismatch { asset, expected, actual } => write!(
+            Self::ChecksumMismatch {
+                asset,
+                expected,
+                actual,
+            } => write!(
                 f,
                 "checksum mismatch for '{asset}': manifest expects sha256 {expected}, \
                  actual sha256 {actual}; the asset is not usable and was not cached"
@@ -220,6 +238,7 @@ impl<'f> BinaryManager<'f> {
         settings_override: Option<&Path>,
     ) -> Result<ResolvedBinary, ResolveError> {
         if let Some(path) = settings_override {
+            self.mark_executable(path);
             return Ok(ResolvedBinary {
                 path: path.to_path_buf(),
                 source: ResolvedSource::SettingsOverride,
@@ -450,13 +469,19 @@ impl Fetcher for HttpGetFetcher {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
-        let mut stream = std::net::TcpStream::connect(authority).map_err(|e| transport(e.to_string()))?;
+        let mut stream =
+            std::net::TcpStream::connect(authority).map_err(|e| transport(e.to_string()))?;
         let request =
             format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-        stream.write_all(request.as_bytes()).map_err(|e| transport(e.to_string()))?;
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| transport(e.to_string()))?;
         let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).map_err(|e| transport(e.to_string()))?;
-        let head_end = find_head_end(&raw).ok_or_else(|| transport("no header terminator".into()))?;
+        stream
+            .read_to_end(&mut raw)
+            .map_err(|e| transport(e.to_string()))?;
+        let head_end =
+            find_head_end(&raw).ok_or_else(|| transport("no header terminator".into()))?;
         let head = String::from_utf8_lossy(&raw[..head_end]);
         let status = head
             .lines()
@@ -465,7 +490,10 @@ impl Fetcher for HttpGetFetcher {
             .and_then(|code| code.parse::<u16>().ok())
             .ok_or_else(|| transport("unparseable status line".into()))?;
         if status != 200 {
-            return Err(FetchError::Status { url: url.to_string(), code: status });
+            return Err(FetchError::Status {
+                url: url.to_string(),
+                code: status,
+            });
         }
         Ok(raw[head_end + 4..].to_vec())
     }
@@ -480,12 +508,8 @@ mod tests {
         names.iter().map(|n| PathBuf::from(n)).collect()
     }
     fn pick(names: &[&str]) -> Option<String> {
-        pick_newest_cached(
-            &cached(names),
-            "zatara-proxy-",
-            "-win-x64",
-        )
-        .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+        pick_newest_cached(&cached(names), "zatara-proxy-", "-win-x64")
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
     }
     #[test]
     fn a_higher_rc_outranks_a_lower_one_whatever_the_text_says() {
