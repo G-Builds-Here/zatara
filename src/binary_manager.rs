@@ -220,6 +220,7 @@ impl<'f> BinaryManager<'f> {
         settings_override: Option<&Path>,
     ) -> Result<ResolvedBinary, ResolveError> {
         if let Some(path) = settings_override {
+            self.mark_executable(path);
             return Ok(ResolvedBinary {
                 path: path.to_path_buf(),
                 source: ResolvedSource::SettingsOverride,
