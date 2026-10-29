@@ -56,7 +56,8 @@ CACHE_DIR := $(ZED_WORK_DIR)/binary-cache
 PROSE := README.md docs/templates/*.md examples/program-debug/README.md
 
 .PHONY: help doctor build wasm test check clippy fmt-check voice \
-	stage-proxy stage-netcoredbg manifest verify-assets release-check clean distclean
+	stage-proxy stage-netcoredbg manifest verify-assets release-check clean distclean \
+	fix-perms dev-update
 
 help: ## List the targets
 	@awk -F ':.*## ' '/^[a-z][a-z-]*:.*## / { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -156,3 +157,18 @@ distclean: clean ## Also drop staged assets and the installed extension wasm
 	@rm -rf $(DIST)
 	@rm -f $(EXTENSION_WASM)
 	@echo "removed $(EXTENSION_WASM): Zed cannot start a session until make wasm rebuilds it"
+
+fix-perms: ## Ensure cached binaries are executable on Unix
+	@if [ -d "$(CACHE_DIR)" ]; then \
+	  find "$(CACHE_DIR)" -type f ! -name "*.zip" ! -name "*.part" -exec chmod +x {} +; \
+	  echo "fixed permissions in $(CACHE_DIR)"; \
+	else \
+	  echo "cache dir $(CACHE_DIR) does not exist yet"; \
+	fi
+
+dev-update: ## Build wasm and remind to reinstall dev extension
+	@$(MAKE) --no-print-directory wasm
+	@echo ""
+	@echo "Wasm rebuilt. Reinstall the dev extension in Zed:"
+	@echo "  zed: install dev extension"
+	@echo "Zed loads the wasm at startup; a restart is required after reinstall."
