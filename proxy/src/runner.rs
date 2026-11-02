@@ -912,7 +912,7 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
         }
     }
     if config.project_path == opened_claim {
-        if let Some(tie) = solution_tie_in(path, fuzzy) {
+        if let Some(tie) = solution_tie_in(path, &config, fuzzy) {
             adopt_solution(&mut *config, tie);
             return;
         }
@@ -987,6 +987,7 @@ fn solution_files_in(dir: &Path) -> Vec<PathBuf> {
 }
 fn solution_tie_in(
     dir: &Path,
+    config: &LaunchConfig,
     fuzzy: bool,
 ) -> Option<crate::project_tiebreak::SolutionTie> {
     if !project_files_in(dir).is_empty() {
@@ -998,6 +999,7 @@ fn solution_tie_in(
     }
     crate::project_tiebreak::break_solution_tie(
         &solutions,
+        gutter_file_from_env(config).as_deref(),
         fuzzy,
         &crate::project_tiebreak::SdkFacts,
     )

@@ -81,23 +81,30 @@ const MAX_SOLUTION_MEMBER_READS: usize = 24;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SolutionTie {
     HoldsTestProject(PathBuf),
+    CompilesClickedFile(PathBuf),
     NamedLikeTests(PathBuf),
 }
 impl SolutionTie {
     pub(crate) fn project(&self) -> &Path {
         match self {
-            SolutionTie::HoldsTestProject(path) | SolutionTie::NamedLikeTests(path) => path,
+            SolutionTie::HoldsTestProject(path)
+            | SolutionTie::CompilesClickedFile(path)
+            | SolutionTie::NamedLikeTests(path) => path,
         }
     }
     pub(crate) fn reason(&self) -> &'static str {
         match self {
             SolutionTie::HoldsTestProject(_) => "the only solution here that contains a test project",
+            SolutionTie::CompilesClickedFile(_) => {
+                "the only solution here whose members compile the clicked file"
+            }
             SolutionTie::NamedLikeTests(_) => "fuzzy match: the only name here that says test",
         }
     }
 }
 pub(crate) fn break_solution_tie(
     solutions: &[PathBuf],
+    clicked: Option<&Path>,
     fuzzy: bool,
     facts: &dyn CandidateFacts,
 ) -> Option<SolutionTie> {
@@ -105,6 +112,7 @@ pub(crate) fn break_solution_tie(
         return None;
     }
     let mut holds_test: Vec<&PathBuf> = Vec::new();
+    let mut memberships: Vec<(&PathBuf, Vec<PathBuf>)> = Vec::new();
     let mut members_read = 0usize;
     let mut complete = true;
     for sln in solutions {
@@ -120,12 +128,47 @@ pub(crate) fn break_solution_tie(
         if members.iter().any(|m| facts.declares_test_host(m)) {
             holds_test.push(sln);
         }
+        memberships.push((sln, members));
     }
     if complete {
         if holds_test.len() == 1 {
             return Some(SolutionTie::HoldsTestProject(
                 holds_test.into_iter().next().expect("one").clone(),
             ));
+        }
+    }
+    if let (Some(file), true) = (clicked, complete) {
+        let mut pool: Vec<PathBuf> = Vec::new();
+        for (_, members) in &memberships {
+            for member in members {
+                if !pool.iter().any(|seen| same_project(seen, member)) {
+                    pool.push(member.clone());
+                }
+            }
+        }
+        if pool.len() <= MAX_SDK_QUERIES {
+            let owners: Vec<PathBuf> = pool
+                .iter()
+                .zip(facts.compiles_file(&pool, file))
+                .filter(|(_, answer)| *answer == Some(true))
+                .map(|(member, _)| member.clone())
+                .collect();
+            if !owners.is_empty() {
+                let holders: Vec<&PathBuf> = memberships
+                    .iter()
+                    .filter(|(_, members)| {
+                        members
+                            .iter()
+                            .any(|m| owners.iter().any(|owner| same_project(owner, m)))
+                    })
+                    .map(|(sln, _)| *sln)
+                    .collect();
+                if holders.len() == 1 {
+                    return Some(SolutionTie::CompilesClickedFile(
+                        (*holders.into_iter().next().expect("one")).clone(),
+                    ));
+                }
+            }
         }
     }
     if fuzzy {
@@ -245,6 +288,9 @@ fn owns(compiled: &[PathBuf], file: &Path) -> bool {
 }
 fn canonical(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
+}
+fn same_project(a: &Path, b: &Path) -> bool {
+    a == b || canonical(a).is_some_and(|ca| canonical(b).is_some_and(|cb| ca == cb))
 }
 #[cfg(test)]
 mod tests {
@@ -519,7 +565,7 @@ EndProject
             ("App.sln", Some(&["App.csproj"])),
             ("App.Tests.sln", Some(&["App.Tests.csproj"])),
         ]);
-        let tie = break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &facts);
+        let tie = break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], None, false, &facts);
         assert_eq!(tie, Some(SolutionTie::HoldsTestProject(sl("App.Tests.sln"))));
         assert!(tie.is_some_and(|t| t.reason().contains("contains a test project")));
     }
@@ -530,12 +576,12 @@ EndProject
             ("Beta.Tests.sln", Some(&["Two.Tests.csproj"])),
         ]);
         assert_eq!(
-            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], false, &both),
+            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], None, false, &both),
             None,
             "two solutions holding tests are two survivors: dotnet's error stays"
         );
         assert_eq!(
-            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], true, &both),
+            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], None, true, &both),
             None,
             "armed but BOTH names say test: still not a fact, still a refusal"
         );
@@ -544,7 +590,7 @@ EndProject
             ("Everything.Tests.sln", Some(&["Plain.csproj"])),
         ]);
         assert_eq!(
-            break_solution_tie(&[sl("App.sln"), sl("Everything.Tests.sln")], false, &misleading_name),
+            break_solution_tie(&[sl("App.sln"), sl("Everything.Tests.sln")], None, false, &misleading_name),
             Some(SolutionTie::HoldsTestProject(sl("App.sln"))),
             "the solution whose MEMBERS declare a test host wins over the one merely named for it"
         );
@@ -556,20 +602,20 @@ EndProject
             ("App.Tests.sln", Some(&["App.Tests.csproj"])),
         ]);
         assert_eq!(
-            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &facts),
+            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], None, false, &facts),
             None
         );
         let blank = Scripted::new(&["App.Tests.csproj"], &[]);
         assert_eq!(
-            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &blank),
+            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], None, false, &blank),
             None
         );
     }
     #[test]
     fn a_single_solution_is_not_a_solution_tie() {
         let facts = Scripted::new(&[], &[]);
-        assert_eq!(break_solution_tie(&[sl("Only.sln")], true, &facts), None);
-        assert_eq!(break_solution_tie(&[], true, &facts), None);
+        assert_eq!(break_solution_tie(&[sl("Only.sln")], None, true, &facts), None);
+        assert_eq!(break_solution_tie(&[], None, true, &facts), None);
     }
     #[test]
     fn membership_beyond_the_read_cap_sinks_the_claim_not_the_gate() {
@@ -581,13 +627,98 @@ EndProject
             ("Other.sln", Some(&["Plain.csproj"])),
         ]);
         assert_eq!(
-            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], false, &facts),
+            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], None, false, &facts),
             None,
             "an unread tail means no ONLY-claim, even when the name is the tie the cap hid"
         );
         assert_eq!(
-            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], true, &facts),
+            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], None, true, &facts),
             Some(SolutionTie::NamedLikeTests(sl("Big.Tests.sln"))),
+            "the cap sinks the FACT rung only; the gated name rung still answers when armed"
+        );
+    }
+    #[test]
+    fn the_only_solution_holding_the_compiling_member_answers_when_contents_tie() {
+        let facts = Scripted::new(
+            &["Legacy.Tests.csproj", "App.Tests.csproj"],
+            &[("MathTests.cs", &["Legacy.Tests.csproj"])],
+        )
+        .with_members(&[
+            ("App.sln", Some(&["App.csproj", "Legacy.Tests.csproj"])),
+            ("App.Tests.sln", Some(&["App.Tests.csproj"])),
+        ]);
+        let tie = break_solution_tie(
+            &[sl("App.sln"), sl("App.Tests.sln")],
+            Some(&clicked("MathTests.cs")),
+            false,
+            &facts,
+        );
+        assert_eq!(
+            tie,
+            Some(SolutionTie::CompilesClickedFile(sl("App.sln"))),
+            "the solution holding the only project that claims the click wins, both holding tests notwithstanding"
+        );
+        assert!(tie.is_some_and(|t| t.reason().contains("compile the clicked file")));
+    }
+    #[test]
+    fn a_member_two_solutions_share_ties_the_ownership_rung_and_the_gate_stands() {
+        let facts = Scripted::new(
+            &["App.Tests.csproj"],
+            &[("MathTests.cs", &["App.Tests.csproj"])],
+        )
+        .with_members(&[
+            ("App.sln", Some(&["App.csproj", "App.Tests.csproj"])),
+            ("App.Tests.sln", Some(&["App.Tests.csproj"])),
+        ]);
+        let solutions = [sl("App.sln"), sl("App.Tests.sln")];
+        assert_eq!(
+            break_solution_tie(&solutions, Some(&clicked("MathTests.cs")), false, &facts),
+            None,
+            "both solutions list the owner: ownership sees two holders and refuses"
+        );
+        assert_eq!(
+            break_solution_tie(&solutions, Some(&clicked("MathTests.cs")), true, &facts),
+            Some(SolutionTie::NamedLikeTests(sl("App.Tests.sln"))),
+            "the refusal belongs to the fact rung; the gate is untouched by it"
+        );
+    }
+    #[test]
+    fn ownership_needs_the_click_the_way_the_project_ladder_does() {
+        let facts = Scripted::new(
+            &["Legacy.Tests.csproj", "App.Tests.csproj"],
+            &[("MathTests.cs", &["Legacy.Tests.csproj"])],
+        )
+        .with_members(&[
+            ("App.sln", Some(&["App.csproj", "Legacy.Tests.csproj"])),
+            ("App.Tests.sln", Some(&["App.Tests.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], None, false, &facts),
+            None
+        );
+    }
+    #[test]
+    fn members_beyond_the_query_cap_sink_the_ownership_rung_not_the_gate() {
+        let fillers: Vec<String> =
+            (1..MAX_SDK_QUERIES).map(|i| format!("P{i}.csproj")).collect();
+        let mut big: Vec<&str> = fillers.iter().map(String::as_str).collect();
+        big.push("HostA.csproj");
+        let facts = Scripted::new(
+            &["HostA.csproj", "HostB.csproj"],
+            &[("MathTests.cs", &["HostB.csproj"])],
+        )
+        .with_members(&[
+            ("Big.sln", Some(big.as_slice())),
+            ("Other.Tests.sln", Some(&["HostB.csproj", "Extra.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("Big.sln"), sl("Other.Tests.sln")], Some(&clicked("MathTests.cs")), false, &facts),
+            None,
+            "more unique members than the query cap: the ownership rung never asks the SDK"
+        );
+        assert_eq!(
+            break_solution_tie(&[sl("Big.sln"), sl("Other.Tests.sln")], Some(&clicked("MathTests.cs")), true, &facts),
+            Some(SolutionTie::NamedLikeTests(sl("Other.Tests.sln"))),
             "the cap sinks the FACT rung only; the gated name rung still answers when armed"
         );
     }
