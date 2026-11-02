@@ -47,6 +47,9 @@ fn case_config_from(
         scope: Some("case".to_string()),
         framework: Some("xunit".to_string()),
         case_arguments,
+        env: get("DOTNET_FILE")
+            .filter(|value| !value.is_empty())
+            .map(|value| std::collections::BTreeMap::from([("DOTNET_FILE".to_string(), value)])),
         method_parameters: numbered(get, &format!("{CAPTURE_PREFIX}method_param_"))?,
         case_raw_arguments: numbered(get, &format!("{CAPTURE_PREFIX}case_raw_"))?,
         ..Default::default()

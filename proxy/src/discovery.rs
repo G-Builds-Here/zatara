@@ -281,6 +281,23 @@ fn test_shape_in(raw: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
     })
 }
+pub(crate) fn test_host_declared(csproj: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(csproj) else {
+        return false;
+    };
+    test_host_declared_in(&raw)
+}
+fn test_host_declared_in(raw: &str) -> bool {
+    if truthy_property(raw, "IsTestProject")
+        || truthy_property(raw, "TestingPlatformDotnetTestSupport")
+    {
+        return true;
+    }
+    package_references(raw).iter().any(|name| {
+        let name = name.to_ascii_lowercase();
+        name.starts_with("microsoft.net.test.sdk") || name.starts_with("microsoft.testing.platform")
+    })
+}
 pub(crate) fn mtp_test_project(csproj: &Path) -> bool {
     if !target_type_is_exe(csproj) {
         return false;
@@ -489,6 +506,54 @@ mod tests {
             !mtp_shape_in(raw),
             "v2 packages alone must not route a launch to the MTP lane"
         );
+    }
+    #[test]
+    fn a_shared_assertions_library_declares_a_framework_but_no_test_host() {
+        let raw = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+                   <TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup>\
+                   <PackageReference Include=\"xunit\" Version=\"2.6.6\" />\
+                   <PackageReference Include=\"xunit.runner.visualstudio\" Version=\"2.5.6\" />\
+                   </ItemGroup></Project>";
+        assert!(
+            test_shape_in(raw),
+            "the door's exclusion still sees it as test-shaped (unchanged law)"
+        );
+        assert!(
+            !test_host_declared_in(raw),
+            "selecting it as THE test project would run zero tests and look like a pass"
+        );
+    }
+    #[test]
+    fn a_declared_test_host_is_a_fact_in_either_framework_generation() {
+        assert!(test_host_declared_in(
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.8.0\" /></ItemGroup></Project>"
+        ));
+        assert!(test_host_declared_in(
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.Testing.Platform.MSBuild\" Version=\"1.4.3\" /></ItemGroup></Project>"
+        ));
+        assert!(test_host_declared_in(
+            "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>"
+        ));
+        assert!(
+            test_host_declared_in("<Project><PropertyGroup><IsTestProject>True</IsTestProject></PropertyGroup></Project>"),
+            "truthiness stays case-insensitive, same rule as the broad read"
+        );
+    }
+    #[test]
+    fn every_declared_host_is_also_test_shaped() {
+        const CORPUS: [&str; 5] = [
+            "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>",
+            "<Project><PropertyGroup><TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport></PropertyGroup></Project>",
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.8.0\" /></ItemGroup></Project>",
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.Testing.Platform\" Version=\"1.4.3\" /></ItemGroup></Project>",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport></PropertyGroup><ItemGroup><PackageReference Include=\"xunit.v3\" Version=\"3.2.2\" /></ItemGroup></Project>",
+        ];
+        for raw in CORPUS {
+            assert!(
+                !test_host_declared_in(raw) || test_shape_in(raw),
+                "the narrow rule accepted a shape the door would not exclude: {raw}"
+            );
+        }
     }
     #[test]
     fn a_test_project_property_act_is_decisive_without_any_package() {

@@ -825,12 +825,17 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
                 break;
             }
             if has_project_file(ancestor) {
+                let tie = tie_break_in(ancestor, &config, fuzzy);
+                if let Some(tie) = tie {
+                    adopt_tie(&mut *config, tie);
+                }
                 break;
             }
             cursor = ancestor.parent();
         }
     }
-    let path = Path::new(config.project_path.as_str());
+    let claim = config.project_path.clone();
+    let path = Path::new(claim.as_str());
     if path.is_file() {
         return;
     }
@@ -846,7 +851,13 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
         config.project_path = project.display().to_string();
         return;
     }
-    if !has_project_file(path) {
+    if has_project_file(path) {
+        let tie = tie_break_in(path, &config, fuzzy);
+        if let Some(tie) = tie {
+            adopt_tie(&mut *config, tie);
+            return;
+        }
+    } else {
         let mut cursor = path.parent();
         while let Some(ancestor) = cursor {
             if let Some(project) = unique_project(ancestor) {
@@ -874,6 +885,13 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
                 config.project_path = project.display().to_string();
                 return;
             }
+            if has_project_file(ancestor) {
+                let tie = tie_break_in(ancestor, &config, fuzzy);
+                if let Some(tie) = tie {
+                    adopt_tie(&mut *config, tie);
+                    return;
+                }
+            }
             cursor = ancestor.parent();
         }
     }
@@ -899,25 +917,10 @@ fn gutter_file_from_env(config: &LaunchConfig) -> Option<PathBuf> {
     path.is_file().then(|| path.to_path_buf())
 }
 fn has_project_file(dir: &Path) -> bool {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries.flatten().any(|entry| {
-                let path = entry.path();
-                path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
-            })
-        })
-        .unwrap_or(false)
+    !project_files_in(dir).is_empty()
 }
 fn unique_project(dir: &Path) -> Option<PathBuf> {
-    let mut projects: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
-        })
-        .collect();
-    projects.sort();
+    let projects = project_files_in(dir);
     match projects.as_slice() {
         [only] => Some(only.clone()),
         [] => None,
@@ -926,6 +929,50 @@ fn unique_project(dir: &Path) -> Option<PathBuf> {
             many.iter().find(|p| p.file_stem().is_some_and(|name| name == stem)).cloned()
         }
     }
+}
+fn project_files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut projects: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    projects.sort();
+    projects
+}
+fn tie_break_in(
+    dir: &Path,
+    config: &LaunchConfig,
+    fuzzy: bool,
+) -> Option<crate::project_tiebreak::Tie> {
+    let candidates = project_files_in(dir);
+    if candidates.len() < 2 {
+        return None;
+    }
+    crate::project_tiebreak::break_tie(
+        &candidates,
+        gutter_file_from_env(config).as_deref(),
+        fuzzy,
+        &crate::project_tiebreak::SdkFacts,
+    )
+}
+fn adopt_tie(config: &mut LaunchConfig, tie: crate::project_tiebreak::Tie) {
+    let project = tie.project().to_path_buf();
+    if Path::new(config.project_path.as_str()) == project {
+        return;
+    }
+    eprintln!(
+        "zatara: projectPath '{}' resolved to '{}' ({}; pin projectPath to stop the guess)",
+        config.project_path,
+        project.display(),
+        tie.reason()
+    );
+    config.project_path = project.display().to_string();
 }
 fn unique_solution(dir: &Path) -> Option<PathBuf> {
     let mut solutions: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -1522,6 +1569,66 @@ mod tests {
             config.project_path,
             tie.display().to_string(),
             "an unresolved tie stays the caller's — dotnet names the ambiguity, not us"
+        );
+    }
+    #[test]
+    fn a_tie_resolves_when_only_one_project_declares_itself_a_test_project() {
+        let dir = fs_temp("tie-testshape");
+        std::fs::write(
+            &dir.join("Catalog.csproj"),
+            b"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>",
+        )
+        .unwrap();
+        std::fs::write(
+            &dir.join("Catalog.Tests.csproj"),
+            b"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup>\
+<ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.11.1\" /></ItemGroup></Project>",
+        )
+        .unwrap();
+        let mut config = config_naming(&dir);
+        resolve_project_path(&mut config);
+        assert_eq!(
+            config.project_path,
+            dir.join("Catalog.Tests.csproj").display().to_string(),
+            "the candidate that names a test host is the answer; the other runs no tests"
+        );
+    }
+    #[test]
+    fn two_test_declared_projects_are_still_a_refusal() {
+        let dir = fs_temp("tie-twotests");
+        for name in ["Unit.csproj", "Integration.csproj"] {
+            std::fs::write(
+                &dir.join(name),
+                b"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>",
+            )
+            .unwrap();
+        }
+        let mut config = config_naming(&dir);
+        resolve_project_path(&mut config);
+        assert_eq!(
+            config.project_path,
+            dir.display().to_string(),
+            "two test projects and no further fact is dotnet's ambiguity to report"
+        );
+    }
+    #[test]
+    fn a_name_saying_tests_is_not_a_fact_and_stays_behind_the_gate() {
+        let dir = fs_temp("tie-name");
+        std::fs::write(&dir.join("Catalog.csproj"), b"<Project/>").unwrap();
+        std::fs::write(&dir.join("Catalog.Tests.csproj"), b"<Project/>").unwrap();
+        let mut strict = config_naming(&dir);
+        resolve_project_path_with(&mut strict, false);
+        assert_eq!(
+            strict.project_path,
+            dir.display().to_string(),
+            "default-off: a name alone must not pick the project"
+        );
+        let mut armed = config_naming(&dir);
+        resolve_project_path_with(&mut armed, true);
+        assert_eq!(
+            armed.project_path,
+            dir.join("Catalog.Tests.csproj").display().to_string(),
+            "armed fuzzy takes the name match where no fact decided"
         );
     }
     #[test]

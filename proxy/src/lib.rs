@@ -5,6 +5,7 @@ pub(crate) mod logging;
 pub mod macos_netcoredbg;
 pub(crate) mod mtp_case;
 pub(crate) mod program;
+pub(crate) mod project_tiebreak;
 pub mod runner;
 pub mod relay;
 pub(crate) mod runcli;
