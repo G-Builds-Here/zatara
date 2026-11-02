@@ -1,16 +1,7 @@
 [
   {
     "label": "Run: ${ZED_CUSTOM_csharp_method_name}",
-    "command": "dotnet",
-    "args": [
-      "test",
-      "\"$ZED_WORKTREE_ROOT\"",
-      "--filter",
-      "\"FullyQualifiedName=${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\"",
-      "--",
-      "--filter-method",
-      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.${ZED_CUSTOM_csharp_method_name}\""
-    ],
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\zatara-run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
@@ -146,16 +137,7 @@
   },
   {
     "label": "Run class: ${ZED_CUSTOM_csharp_class_name}",
-    "command": "dotnet",
-    "args": [
-      "test",
-      "\"$ZED_WORKTREE_ROOT\"",
-      "--filter",
-      "\"FullyQualifiedName~${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}.\"",
-      "--",
-      "--filter-class",
-      "\"${ZED_CUSTOM_csharp_namespace}.${ZED_CUSTOM_csharp_class_name}\""
-    ],
+    "command": "& \"$env:LOCALAPPDATA\\Zed\\extensions\\installed\\zatara-netcoredbg\\zatara-run-case.cmd\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "env": {
       "DOTNET_FILE": "$ZED_FILE",
