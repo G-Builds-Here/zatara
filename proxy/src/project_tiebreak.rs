@@ -9,6 +9,7 @@ const POLL: Duration = Duration::from_millis(20);
 pub(crate) trait CandidateFacts {
     fn declares_test_host(&self, csproj: &Path) -> bool;
     fn compiles_file(&self, candidates: &[PathBuf], file: &Path) -> Vec<Option<bool>>;
+    fn solution_members(&self, sln: &Path) -> Option<Vec<PathBuf>>;
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Tie {
@@ -76,6 +77,86 @@ pub(crate) fn break_tie(
     }
     None
 }
+const MAX_SOLUTION_MEMBER_READS: usize = 24;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SolutionTie {
+    HoldsTestProject(PathBuf),
+    NamedLikeTests(PathBuf),
+}
+impl SolutionTie {
+    pub(crate) fn project(&self) -> &Path {
+        match self {
+            SolutionTie::HoldsTestProject(path) | SolutionTie::NamedLikeTests(path) => path,
+        }
+    }
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            SolutionTie::HoldsTestProject(_) => "the only solution here that contains a test project",
+            SolutionTie::NamedLikeTests(_) => "fuzzy match: the only name here that says test",
+        }
+    }
+}
+pub(crate) fn break_solution_tie(
+    solutions: &[PathBuf],
+    fuzzy: bool,
+    facts: &dyn CandidateFacts,
+) -> Option<SolutionTie> {
+    if solutions.len() < 2 {
+        return None;
+    }
+    let mut holds_test: Vec<&PathBuf> = Vec::new();
+    let mut members_read = 0usize;
+    let mut complete = true;
+    for sln in solutions {
+        let Some(members) = facts.solution_members(sln) else {
+            complete = false;
+            break;
+        };
+        if members_read + members.len() > MAX_SOLUTION_MEMBER_READS {
+            complete = false;
+            break;
+        }
+        members_read += members.len();
+        if members.iter().any(|m| facts.declares_test_host(m)) {
+            holds_test.push(sln);
+        }
+    }
+    if complete {
+        if holds_test.len() == 1 {
+            return Some(SolutionTie::HoldsTestProject(
+                holds_test.into_iter().next().expect("one").clone(),
+            ));
+        }
+    }
+    if fuzzy {
+        let named: Vec<&PathBuf> = solutions
+            .iter()
+            .filter(|sln| {
+                sln.file_stem()
+                    .is_some_and(|stem| stem.to_string_lossy().to_ascii_lowercase().contains("test"))
+            })
+            .collect();
+        if named.len() == 1 {
+            return Some(SolutionTie::NamedLikeTests(
+                (*named.into_iter().next().expect("one")).clone(),
+            ));
+        }
+    }
+    None
+}
+pub(crate) fn solution_member_projects(raw: &str, base: &Path) -> Vec<PathBuf> {
+    raw.lines()
+        .filter_map(|line| {
+            let after = line.strip_prefix("Project(")?;
+            let (_type_guid, rest) = after.split_once("\")")?;
+            let path = rest.split('"').nth(3)?;
+            if !path.to_ascii_lowercase().ends_with(".csproj") {
+                return None;
+            }
+            Some(base.join(path.replace('\\', std::path::MAIN_SEPARATOR_STR)))
+        })
+        .collect()
+}
 pub(crate) struct SdkFacts;
 impl CandidateFacts for SdkFacts {
     fn declares_test_host(&self, csproj: &Path) -> bool {
@@ -87,6 +168,11 @@ impl CandidateFacts for SdkFacts {
             .into_iter()
             .map(|answer| answer.map(|paths| owns(&paths, file)))
             .collect()
+    }
+    fn solution_members(&self, sln: &Path) -> Option<Vec<PathBuf>> {
+        let raw = std::fs::read_to_string(sln).ok()?;
+        let base = sln.parent().unwrap_or(Path::new("."));
+        Some(solution_member_projects(&raw, base))
     }
 }
 fn ask_sdk(candidates: &[PathBuf]) -> Vec<Option<Vec<PathBuf>>> {
@@ -168,6 +254,7 @@ mod tests {
         hosts: Vec<String>,
         owners: BTreeMap<String, Vec<String>>,
         silent: Vec<String>,
+        members: BTreeMap<String, Option<Vec<String>>>,
     }
     impl Scripted {
         fn new(hosts: &[&str], owners: &[(&str, &[&str])]) -> Self {
@@ -183,7 +270,20 @@ mod tests {
                     })
                     .collect(),
                 silent: silent.iter().map(|s| s.to_string()).collect(),
+                members: BTreeMap::new(),
             }
+        }
+        fn with_members(mut self, members: &[(&str, Option<&[&str]>)]) -> Self {
+            self.members = members
+                .iter()
+                .map(|(sln, list)| {
+                    (
+                        (*sln).to_string(),
+                        list.map(|names| names.iter().map(|s| s.to_string()).collect()),
+                    )
+                })
+                .collect();
+            self
         }
     }
     impl CandidateFacts for Scripted {
@@ -204,6 +304,13 @@ mod tests {
                     owners.contains(&name).then_some(true)
                 })
                 .collect()
+        }
+        fn solution_members(&self, sln: &Path) -> Option<Vec<PathBuf>> {
+            let key = sln.file_name()?.to_string_lossy().into_owned();
+            self.members
+                .get(&key)?
+                .as_ref()
+                .map(|names| names.iter().map(|n| PathBuf::from("C:/repo").join(n)).collect())
         }
     }
     fn cs(name: &str) -> PathBuf {
@@ -379,5 +486,109 @@ mod tests {
             "the only project here that declares a test host"
         );
         assert_eq!(Tie::CompilesClickedFile(cs("A.csproj")).project(), Path::new("C:/repo/A.csproj"));
+    }
+    fn sl(name: &str) -> PathBuf {
+        PathBuf::from("C:/repo").join(name)
+    }
+    #[test]
+    fn the_solution_parse_reads_the_lines_a_real_sln_writes() {
+        const REAL: &str = "\
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"App\", \"src\\App\\App.csproj\", \"{8E87D182-5AD9-4C4E-9D3E-0C5B9C0B4E01}\"
+EndProject
+Project(\"{9A19103F-16F7-4668-BE54-9A1E7A4F7556}\") = \"Tests\", \"tests\\App.Tests\\App.Tests.csproj\", \"{8E87D182-5AD9-4C4E-9D3E-0C5B9C0B4E02}\"
+EndProject
+Project(\"{2150E333-8F63-4F36-94BC-87A4C4706939}\") = \"Solution Items\", \"Solution Items\", \"{8E87D182-5AD9-4C4E-9D3E-0C5B9C0B4E03}\"
+EndProject
+Project(\"{D9595E5D-178B-4280-9606-1935E6BF6F26}\") = \"Shared\", \"shared\\Shared.projitems\", \"{8E87D182-5AD9-4C4E-9D3E-0C5B9C0B4E04}\")
+EndProject
+";
+        let members = solution_member_projects(REAL, Path::new("C:/repo"));
+        assert_eq!(
+            members,
+            vec![
+                PathBuf::from("C:/repo").join("src").join("App").join("App.csproj"),
+                PathBuf::from("C:/repo").join("tests").join("App.Tests").join("App.Tests.csproj"),
+            ]
+        );
+        assert!(solution_member_projects("random text\n", Path::new("C:/repo")).is_empty());
+    }
+    #[test]
+    fn the_only_solution_with_a_test_member_answers_unarmed() {
+        let facts = Scripted::new(&["App.Tests.csproj"], &[]).with_members(&[
+            ("App.sln", Some(&["App.csproj"])),
+            ("App.Tests.sln", Some(&["App.Tests.csproj"])),
+        ]);
+        let tie = break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &facts);
+        assert_eq!(tie, Some(SolutionTie::HoldsTestProject(sl("App.Tests.sln"))));
+        assert!(tie.is_some_and(|t| t.reason().contains("contains a test project")));
+    }
+    #[test]
+    fn two_solutions_with_test_members_refuse_strictly_and_name_only_when_armed() {
+        let both = Scripted::new(&["One.Tests.csproj", "Two.Tests.csproj"], &[]).with_members(&[
+            ("Alpha.Tests.sln", Some(&["One.Tests.csproj"])),
+            ("Beta.Tests.sln", Some(&["Two.Tests.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], false, &both),
+            None,
+            "two solutions holding tests are two survivors: dotnet's error stays"
+        );
+        assert_eq!(
+            break_solution_tie(&[sl("Alpha.Tests.sln"), sl("Beta.Tests.sln")], true, &both),
+            None,
+            "armed but BOTH names say test: still not a fact, still a refusal"
+        );
+        let misleading_name = Scripted::new(&["Real.Tests.csproj"], &[]).with_members(&[
+            ("App.sln", Some(&["Real.Tests.csproj"])),
+            ("Everything.Tests.sln", Some(&["Plain.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("App.sln"), sl("Everything.Tests.sln")], false, &misleading_name),
+            Some(SolutionTie::HoldsTestProject(sl("App.sln"))),
+            "the solution whose MEMBERS declare a test host wins over the one merely named for it"
+        );
+    }
+    #[test]
+    fn an_unreadable_solution_is_never_read_as_having_no_test_project() {
+        let facts = Scripted::new(&["App.Tests.csproj"], &[]).with_members(&[
+            ("App.sln", None),
+            ("App.Tests.sln", Some(&["App.Tests.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &facts),
+            None
+        );
+        let blank = Scripted::new(&["App.Tests.csproj"], &[]);
+        assert_eq!(
+            break_solution_tie(&[sl("App.sln"), sl("App.Tests.sln")], false, &blank),
+            None
+        );
+    }
+    #[test]
+    fn a_single_solution_is_not_a_solution_tie() {
+        let facts = Scripted::new(&[], &[]);
+        assert_eq!(break_solution_tie(&[sl("Only.sln")], true, &facts), None);
+        assert_eq!(break_solution_tie(&[], true, &facts), None);
+    }
+    #[test]
+    fn membership_beyond_the_read_cap_sinks_the_claim_not_the_gate() {
+        let many: Vec<&str> = (0..MAX_SOLUTION_MEMBER_READS + 1)
+            .map(|i| if i == 0 { "Host.csproj" } else { "Plain.csproj" })
+            .collect();
+        let facts = Scripted::new(&["Host.csproj"], &[]).with_members(&[
+            ("Big.Tests.sln", Some(many.as_slice())),
+            ("Other.sln", Some(&["Plain.csproj"])),
+        ]);
+        assert_eq!(
+            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], false, &facts),
+            None,
+            "an unread tail means no ONLY-claim, even when the name is the tie the cap hid"
+        );
+        assert_eq!(
+            break_solution_tie(&[sl("Big.Tests.sln"), sl("Other.sln")], true, &facts),
+            Some(SolutionTie::NamedLikeTests(sl("Big.Tests.sln"))),
+            "the cap sinks the FACT rung only; the gated name rung still answers when armed"
+        );
     }
 }

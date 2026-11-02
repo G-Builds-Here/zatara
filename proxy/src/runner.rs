@@ -808,6 +808,7 @@ fn fuzzy_armed(raw: Option<&str>) -> bool {
     raw == Some("1")
 }
 fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
+    let opened_claim = config.project_path.clone();
     if let Some(file) = gutter_file_from_env(&config) {
         let claimed = Path::new(config.project_path.as_str());
         let mut cursor = file.parent();
@@ -910,6 +911,15 @@ fn resolve_project_path_with(config: &mut LaunchConfig, fuzzy: bool) {
             cursor = dir.parent();
         }
     }
+    if config.project_path == opened_claim {
+        if let Some(tie) = solution_tie_in(path, fuzzy) {
+            adopt_solution(&mut *config, tie);
+            return;
+        }
+        if let Some(note) = folder_ambiguity_note(path) {
+            eprintln!("{note}");
+        }
+    }
 }
 fn gutter_file_from_env(config: &LaunchConfig) -> Option<PathBuf> {
     let raw = config.env.as_ref()?.get("DOTNET_FILE")?;
@@ -960,6 +970,91 @@ fn tie_break_in(
         fuzzy,
         &crate::project_tiebreak::SdkFacts,
     )
+}
+fn solution_files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut solutions: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sln"))
+        })
+        .collect();
+    solutions.sort();
+    solutions
+}
+fn solution_tie_in(
+    dir: &Path,
+    fuzzy: bool,
+) -> Option<crate::project_tiebreak::SolutionTie> {
+    if !project_files_in(dir).is_empty() {
+        return None;
+    }
+    let solutions = solution_files_in(dir);
+    if solutions.len() < 2 {
+        return None;
+    }
+    crate::project_tiebreak::break_solution_tie(
+        &solutions,
+        fuzzy,
+        &crate::project_tiebreak::SdkFacts,
+    )
+}
+fn adopt_solution(config: &mut LaunchConfig, tie: crate::project_tiebreak::SolutionTie) {
+    let solution = tie.project().to_path_buf();
+    if config.project_path == solution.display().to_string() {
+        return;
+    }
+    eprintln!(
+        "zatara: projectPath '{}' resolved to '{}' ({}; pin projectPath to stop the guess)",
+        config.project_path,
+        solution.display(),
+        tie.reason()
+    );
+    config.project_path = solution.display().to_string();
+}
+fn folder_ambiguity_note(dir: &Path) -> Option<String> {
+    let projects = project_files_in(dir);
+    let solutions = solution_files_in(dir);
+    if projects.len() + solutions.len() < 2 {
+        return None;
+    }
+    let mut holds = Vec::new();
+    if solutions.len() >= 2 {
+        holds.push(format!(
+            "{} solution(s): {}",
+            solutions.len(),
+            names_joined(&solutions)
+        ));
+    }
+    if projects.len() >= 2 {
+        holds.push(format!(
+            "{} project(s): {}",
+            projects.len(),
+            names_joined(&projects)
+        ));
+    }
+    if holds.is_empty() {
+        if solutions.len() == 1 {
+            holds.push(format!("a solution: {}", names_joined(&solutions)));
+        } else {
+            return None;
+        }
+    }
+    Some(format!(
+        "zatara: '{}' holds {}; pin projectPath to one of them, or set ZATARA_FUZZY_MATCH=1 to arm name matching",
+        dir.display(),
+        holds.join(" and ")
+    ))
+}
+fn names_joined(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 fn adopt_tie(config: &mut LaunchConfig, tie: crate::project_tiebreak::Tie) {
     let project = tie.project().to_path_buf();
@@ -1629,6 +1724,126 @@ mod tests {
             armed.project_path,
             dir.join("Catalog.Tests.csproj").display().to_string(),
             "armed fuzzy takes the name match where no fact decided"
+        );
+    }
+    fn write_sln(dir: &Path, stem: &str, members: &[&str]) {
+        let mut text = String::from("\nMicrosoft Visual Studio Solution File, Format Version 12.00\n");
+        for (i, member) in members.iter().enumerate() {
+            text.push_str(&format!(
+                "Project(\"{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}\") = \"P{i}\", \"{member}\", \"{{8E87D182-5AD9-4C4E-9D3E-0C5B9C0B4E{i}}}\")\nEndProject\n"
+            ));
+        }
+        std::fs::write(dir.join(format!("{stem}.sln")), text).expect("sln");
+    }
+    fn write_csproj(dir: &Path, rel: &str, declares_host: bool) {
+        let full = dir.join(rel);
+        std::fs::create_dir_all(full.parent().unwrap()).expect("member dir");
+        let body = if declares_host {
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></Project>"
+        } else {
+            "<Project/>"
+        };
+        std::fs::write(&full, body).expect("csproj");
+    }
+    #[test]
+    fn the_only_solution_holding_a_test_project_answers_at_the_default() {
+        let root = fs_temp("sln-facts");
+        write_sln(&root, "App", &["src\\App\\App.csproj"]);
+        write_sln(&root, "App.Tests", &["tests\\App.Tests\\App.Tests.csproj"]);
+        write_csproj(&root, "src/App/App.csproj", false);
+        write_csproj(&root, "tests/App.Tests/App.Tests.csproj", true);
+        let mut config = config_naming(&root);
+        resolve_project_path_with(&mut config, false);
+        assert_eq!(
+            config.project_path,
+            root.join("App.Tests.sln").display().to_string(),
+            "the solution holding the only test project answers with no env and no gate"
+        );
+    }
+    #[test]
+    fn two_solutions_holding_test_projects_are_a_refusal_the_pane_can_act_on() {
+        let root = fs_temp("sln-two");
+        write_sln(&root, "Alpha.Tests", &["src\\One\\One.Tests.csproj"]);
+        write_sln(&root, "Beta.Tests", &["src\\Two\\Two.Tests.csproj"]);
+        write_csproj(&root, "src/One/One.Tests.csproj", true);
+        write_csproj(&root, "src/Two/Two.Tests.csproj", true);
+        let mut strict = config_naming(&root);
+        resolve_project_path_with(&mut strict, false);
+        assert_eq!(
+            strict.project_path,
+            root.display().to_string(),
+            "two solutions each holding a test project: a refusal, not a coin flip"
+        );
+        let note = folder_ambiguity_note(&root).expect("the refusal speaks its candidates");
+        assert!(
+            note.contains("Alpha.Tests.sln") && note.contains("Beta.Tests.sln"),
+            "the note must name what dotnet tripped on: {note}"
+        );
+        assert!(note.contains("projectPath"), "the note must name the pin: {note}");
+        assert!(
+            note.contains("ZATARA_FUZZY_MATCH"),
+            "the note must name the gate: {note}"
+        );
+        let mut armed = config_naming(&root);
+        resolve_project_path_with(&mut armed, true);
+        assert_eq!(
+            armed.project_path,
+            root.display().to_string(),
+            "armed is not armed-enough: when BOTH names say test, still nobody"
+        );
+    }
+    #[test]
+    fn a_unique_test_name_answers_two_test_holding_solutions_only_when_armed() {
+        let root = fs_temp("sln-name");
+        write_sln(&root, "App", &["src\\Real\\Real.Tests.csproj"]);
+        write_sln(&root, "Everything.Tests", &["src\\Plain\\Plain.csproj"]);
+        write_csproj(&root, "src/Real/Real.Tests.csproj", true);
+        write_csproj(&root, "src/Plain/Plain.csproj", false);
+        let mut strict = config_naming(&root);
+        resolve_project_path_with(&mut strict, false);
+        assert_eq!(
+            strict.project_path,
+            root.join("App.sln").display().to_string(),
+            "membership outranks the misleading name, unarmed"
+        );
+    }
+    #[test]
+    fn the_ambiguity_note_names_candidates_or_stays_silent() {
+        let two_projects = fs_temp("note-projects");
+        std::fs::write(&two_projects.join("Catalog.csproj"), b"<Project/>").unwrap();
+        std::fs::write(&two_projects.join("Catalog.Common.csproj"), b"<Project/>").unwrap();
+        let note = folder_ambiguity_note(&two_projects).expect("two projects is one honest line");
+        assert!(
+            note.contains("Catalog.csproj") && note.contains("Catalog.Common.csproj"),
+            "named: {note}"
+        );
+        assert!(note.contains("projectPath") && note.contains("ZATARA_FUZZY_MATCH"), "usable: {note}");
+        let one = fs_temp("note-one");
+        std::fs::write(&one.join("Only.csproj"), b"<Project/>").unwrap();
+        assert!(folder_ambiguity_note(&one).is_none(), "one project: nothing to refuse");
+        let empty = fs_temp("note-empty");
+        assert!(folder_ambiguity_note(&empty).is_none(), "an empty folder is MSB1003's story");
+        let one_sln = fs_temp("note-sln");
+        write_sln(&one_sln, "Only", &[]);
+        assert!(folder_ambiguity_note(&one_sln).is_none(), "one solution: dotnet picks it happily");
+    }
+    #[test]
+    fn solutions_wait_while_the_folder_still_has_its_own_projects() {
+        let root = fs_temp("sln-vs-proj");
+        write_sln(&root, "Everything", &["src\\One\\One.csproj"]);
+        write_sln(&root, "Second", &["src\\Two\\Two.csproj"]);
+        std::fs::write(
+            &root.join("Catalog.Tests.csproj"),
+            b"<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></Project>",
+        )
+        .unwrap();
+        std::fs::write(&root.join("Catalog.csproj"), b"<Project/>").unwrap();
+        let mut config = config_naming(&root);
+        resolve_project_path_with(&mut config, false);
+        assert_eq!(
+            config.project_path,
+            root.join("Catalog.Tests.csproj").display().to_string(),
+            "a project folder resolves to its project; the solution ladder stays solution-shaped-only"
         );
     }
     #[test]
