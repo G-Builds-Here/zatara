@@ -140,7 +140,10 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   plain-run fix (2026-11-02): without a tag the proxy reads the click's
   scope from the captures and passes the task's `ZATARA_TEST_FILTER` to
   dotnet verbatim, changing only the project - the resolved one, not the
-  root. On macOS and Linux these launcher commands cannot resolve (Zed gives
+  root. A click whose resolved project is xunit v3-shaped skips that form:
+  on the .NET 10 SDK the `dotnet test` filter form is fatal there, not
+  merely dropped, and the xunit v3 section below names what runs instead.
+  On macOS and Linux these launcher commands cannot resolve (Zed gives
   every task one command for every OS, the [Upstream gaps](#upstream-gaps)
   table row) - until the override below binds them, plain Run there reaches
   neither dotnet nor the resolver. The package also ships the launcher's
@@ -202,6 +205,17 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   display names, enum expressions like flag combinations or casts) decline
   with a message pointing at the method's gutter arrow instead of silently
   running a wider set.
+- **A v3 method or class Run rides the framework's own selectors.** Measured
+  2026-11-03 on the .NET 10 SDK: there `dotnet test` forwards the vstest
+  `--filter` into the xunit runner, where it collides with the forwarded
+  selector (`XunitFilters.GuardEmptyVSTestFilter` throws, zero tests run),
+  and the current Microsoft.Testing.Platform targets refuse the vstest entry
+  point outright. A v3 method or class gutter Run therefore builds the
+  project and runs the built program with `-method <fqn>` or `-class
+  <class>`, the console grammar the Debug lane already speaks, and the Run
+  tab names the scope it ran. The same selectors answer green on the older
+  generation too (measured on xunit.v3 3.2.2/net8 and 4.0.2/net10), so one
+  shape serves both SDK generations.
 
 **`[MemberData]`/`[ClassData]` run the whole theory.**
 

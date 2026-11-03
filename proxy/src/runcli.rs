@@ -166,6 +166,12 @@ fn run_plain_lane(get: &dyn Fn(&str) -> Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let target = Path::new(&config.project_path);
+    if target.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
+        && discovery::mtp_test_project(target)
+    {
+        return run_mtp_plain(&config);
+    }
     let program = argv[0].clone();
     let status = std::process::Command::new(&program)
         .args(&argv[1..])
@@ -173,7 +179,29 @@ fn run_plain_lane(get: &dyn Fn(&str) -> Option<String>) -> ExitCode {
         .status();
     child_exit(status, &program)
 }
-fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
+fn mtp_plain_args(config: &LaunchConfig) -> Vec<String> {
+    let selector = if config.scope.as_deref() == Some("class") {
+        "-class"
+    } else {
+        "-method"
+    };
+    vec![selector.to_string(), config.fully_qualified_name.clone()]
+}
+fn run_mtp_plain(config: &LaunchConfig) -> ExitCode {
+    let dll = match mtp_build_and_locate(config, "the run could start") {
+        Ok(dll) => dll,
+        Err(code) => return code,
+    };
+    let args = mtp_plain_args(config);
+    eprintln!("zatara: xunit v3 native run: {} {}", args[0], args[1]);
+    let status = std::process::Command::new("dotnet")
+        .arg(&dll)
+        .args(&args)
+        .current_dir(runner::work_dir(config))
+        .status();
+    child_exit(status, "dotnet")
+}
+fn mtp_build_and_locate(config: &LaunchConfig, stage: &str) -> Result<std::path::PathBuf, ExitCode> {
     let csproj = Path::new(&config.project_path);
     let build = std::process::Command::new("dotnet")
         .arg("build")
@@ -184,21 +212,27 @@ fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
         Ok(status) if status.success() => {}
         Ok(status) => {
             eprintln!(
-                "zatara-proxy run-case: `dotnet build` failed before the row could be resolved ({status})"
+                "zatara-proxy run-case: `dotnet build` failed before {stage} ({status})"
             );
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         Err(e) => {
             eprintln!("zatara-proxy run-case: failed to spawn `dotnet build`: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
-    let dll = match discovery::locate_built_dll(csproj) {
-        Ok(dll) => dll,
+    match discovery::locate_built_dll(csproj) {
+        Ok(dll) => Ok(dll),
         Err(e) => {
             eprintln!("zatara-proxy run-case: {e}");
-            return ExitCode::FAILURE;
+            Err(ExitCode::FAILURE)
         }
+    }
+}
+fn run_mtp_case(config: &LaunchConfig) -> ExitCode {
+    let dll = match mtp_build_and_locate(config, "the row could be resolved") {
+        Ok(dll) => dll,
+        Err(code) => return code,
     };
     let id = match mtp_case::resolve_case_id(&dll, config) {
         Ok(id) => id,
@@ -367,6 +401,22 @@ mod tests {
                 "--filter-class",
                 "Shapes.CalcTests",
             ]
+        );
+    }
+    #[test]
+    fn a_v3_method_click_rides_the_framework_method_selector() {
+        let (config, _) = plain_plan(&env(&method_click())).expect("a method click names a run");
+        assert_eq!(
+            mtp_plain_args(&config),
+            vec!["-method".to_string(), "Shapes.CalcTests.AddsOne".to_string()]
+        );
+    }
+    #[test]
+    fn a_v3_class_click_rides_the_framework_class_selector() {
+        let (config, _) = plain_plan(&env(&class_click())).expect("a class click names a run");
+        assert_eq!(
+            mtp_plain_args(&config),
+            vec!["-class".to_string(), "Shapes.CalcTests".to_string()]
         );
     }
     #[test]
