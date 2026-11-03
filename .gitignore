@@ -3,3 +3,6 @@
 *.wasm
 /dist
 /ndbg-raw
+# The run-case launcher downloads its pinned binaries here at run time;
+# machine state, never shipped.
+/binary-cache/

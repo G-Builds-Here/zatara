@@ -128,10 +128,20 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   PowerShell command spawning the package-root launcher
   `zatara-run-case.cmd` (the development workspace keeps it at
   `crates/zatara/zatara-run-case.cmd` and the mirror ships it), which
-  resolves the cached proxy and the console helper
-  `zatara-run-case.exe` beside it. The helper is a release asset the
-  extension fetches with the proxy, SHA256-verified against the pinned
-  manifest; without it the launcher's buffered fallback still runs the row.
+  resolves the pinned proxy and the console helper
+  `zatara-run-case.exe` beside it. Pinned means self-fetching: the launcher
+  reads the version from the `extension.toml` beside it, searches both
+  binary caches for that exact asset name, and on a miss downloads the
+  pinned release itself - SHA256-verified against the release manifest and
+  renamed into place only after the hash matches. An extension update is
+  therefore followed by the next Run, not by a mandatory Debug session
+  first. A failed download stays visible: the newest cached proxy still
+  runs (offline use keeps working) with a pane line naming the wanted
+  asset and the reason, and with nothing cached the decline names the
+  failed fetch. `ZATARA_RELEASE_BASE` replaces the download base with a
+  mirror that serves the same layout - leave it unset in normal use. The
+  helper is a release asset fetched the same way; without it the launcher's
+  buffered fallback still runs the row.
   The row's identity travels through the injected `ZED_CUSTOM_csharp_*`
   capture env with zero argv, so no shell metacharacter can reach the
   composed line, and the same AND-substring filter the debug lane composes
@@ -147,8 +157,9 @@ attached, the `Passed!` summary closed the stream, zero orphan processes).
   every task one command for every OS, the [Upstream gaps](#upstream-gaps)
   table row) - until the override below binds them, plain Run there reaches
   neither dotnet nor the resolver. The package also ships the launcher's
-  unix twin `zatara-run-case.sh` beside the batch twin: it execs the same
-  proxy `run-case` entry with the same env contract, so it answers method,
+  unix twin `zatara-run-case.sh` beside the batch twin: it carries the same
+  pinned self-fetch law and execs the same proxy `run-case` entry with the
+  same env contract, so it answers method,
   class, and row clicks identically, and Zed's one-command physics are the
   only reason it is not a shipped default.
 - mac/Linux users can bind that twin to the gutter themselves, and the
@@ -662,7 +673,7 @@ Linux run the same Zed source but carry no live record here.
 | The debug panel never says passed or failed | The run's report card is the **Console** tab: the vstest summary (`Passed! - Failed: 0, ...`) lands there when the session closes. Zed's debug panel carries no test-run state; that is an upstream gap (see [Upstream gaps](#upstream-gaps)), not something an extension can add. |
 | Session runs but the release is unreachable (private repository, GitHub answers 404 to anonymous asset downloads, or offline) | Working as designed: the session runs from the settings override or the cached binaries, and Zed's log carries a `degraded session` note naming what went unverified. Nothing appears in the editor. If there is no proxy on disk at all the session cannot start; point `dap.zatara-netcoredbg.binary` at one, run one session while a release is reachable so the cache fills, or publish the releases anonymously. |
 | "test host did not pause within 30s" | The framework never parked a `testhost`. Confirm the target is a runnable test, or raise `ZATARA_RUNNER_BANNER_TIMEOUT_SECS`. |
-| The Run tab says `zatara run-case: no zatara-proxy` | The Run lane launches a cached release binary, and a Debug session is what downloads those binaries (hash-verified, into Zed's extension work directory or the package's own `binary-cache`, both searched). Debug any test once and every later gutter Run finds the proxy; the decline line names the two folders it searched. On a fresh install that has never debugged, this line is the ordering, not a broken install. |
+| The Run tab says `zatara run-case: no zatara-proxy` | The Run lane launches a versioned release binary and downloads the pinned one itself (hash-verified) when neither cache holds it; the folders it searched and the failed fetch both appear in the pane lines. The line means the release was unreachable with nothing cached: check the network, set `ZATARA_RELEASE_BASE` to a mirror that serves the release layout, or Debug any test once - the debug lane's downloader writes the same folders. |
 | macOS: netcoredbg not found | **Apple-silicon:** zatara downloads the official osx-arm64 build automatically; this message means the pinned release was unreachable and nothing was cached yet; install netcoredbg from [Samsung/netcoredbg releases](https://github.com/Samsung/netcoredbg/releases) and keep it on `PATH`. **Intel:** upstream publishes no Intel macOS build and there is no Homebrew formula; build netcoredbg from source and put it on `PATH`. |
 | The next build fails with file locks after a stopped session | A test host survived the stop. Retry the session; the proxy records every child it adopts and takes the whole tree down on stop and on crash, so a survivor is a bug worth reporting. |
 | `no xunit v3 test case matches ...` when Running/Debugging one xunit v3 row | The clicked row's runner-side name cannot be rebuilt from the source text (custom display names, enum flag/cast expressions). Run the method's gutter arrow to run all of its rows; the decline message names the method. |

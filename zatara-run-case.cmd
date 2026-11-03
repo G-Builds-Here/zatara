@@ -43,16 +43,48 @@ set "OUT=%TEMP%\zatara-run-case-%RANDOM%.out"
 set "CACHE=%~dp0binary-cache"
 set "WORK=%LOCALAPPDATA%\Zed\extensions\work\zatara-netcoredbg\binary-cache"
 if not "%ZATARA_PROXY_DEV%"=="" set "PROXY=%ZATARA_PROXY_DEV%"
-if not defined PROXY for /f "delims=" %%f in ('dir /b /a-d /o-d "%CACHE%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%CACHE%\%%f"
-if not defined PROXY for /f "delims=" %%f in ('dir /b /a-d /o-d "%WORK%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%WORK%\%%f"
+rem ---- pinned self-fetch (owner sighting 2026-11-03) ----------------------
+rem extension.toml beside this file names the version this install IS. The
+rem caches are searched for that exact asset name first; on a miss the
+rem launcher downloads it itself - hash-verified against the release's
+rem manifest.json, renamed into place only after the hash matches -
+rem instead of making the user Debug one test first. The sighting: after
+rem an extension update the newest cached proxy was the PREVIOUS release,
+rem gutter Run ran it silently, and the bug the update had just fixed
+rem reappeared as if unfixed. A failed download is visible, never silent:
+rem the newest cached proxy still runs (offline usability) but the pane
+rem line names what went wrong, and with no cached proxy the decline
+rem names the failed fetch too. ZATARA_RELEASE_BASE overrides the download
+rem root (mirror and test seam; the same releases/latest/download layout
+rem the extension's own downloader uses).
+if defined PROXY goto :resolved
+if exist "%~dp0extension.toml" for /f "usebackq tokens=2 delims==" %%v in (`findstr /b /r "version *=" "%~dp0extension.toml"`) do call :setver %%v
+set "BASE=https://github.com/G-Builds-Here/zatara/releases/latest/download"
+if not "%ZATARA_RELEASE_BASE%"=="" set "BASE=%ZATARA_RELEASE_BASE%"
+if defined VER set "WANT=zatara-proxy-!VER!-win-x64.exe"
+if defined VER if exist "%CACHE%\!WANT!" set "PROXY=%CACHE%\!WANT!"
+if not defined PROXY if defined VER if exist "%WORK%\!WANT!" set "PROXY=%WORK%\!WANT!"
+if not defined PROXY if defined VER call :fetch "%CACHE%" "!WANT!" PROXY
 if not defined PROXY (
-  echo zatara run-case: no zatara-proxy*.exe in "%CACHE%" or "%WORK%" - Debug one test to download the binaries, or set ZATARA_PROXY_DEV to a built proxy for development.
-  exit /b 2
+  if defined VER set "STALE=1"
+  for /f "delims=" %%f in ('dir /b /a-d /o-d "%CACHE%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%CACHE%\%%f"
+  for /f "delims=" %%f in ('dir /b /a-d /o-d "%WORK%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%WORK%\%%f"
+  if defined PROXY if defined STALE echo zatara run-case: pinned !WANT! unavailable - !WHY! - running the cached proxy instead; Debug one test to refresh, or check the network.
+  if not defined PROXY if defined VER echo zatara run-case: could not fetch !WANT! - !WHY!.
+  if not defined PROXY (
+    echo zatara run-case: no zatara-proxy*.exe in "%CACHE%" or "%WORK%" - Debug one test to download the binaries, or set ZATARA_PROXY_DEV to a built proxy for development.
+    exit /b 2
+  )
 )
+:resolved
 set "HELPER="
 for %%P in ("%PROXY%") do if exist "%%~dpPzatara-run-case.exe" set "HELPER=%%~dpPzatara-run-case.exe"
 if not defined HELPER for /f "delims=" %%f in ('dir /b /a-d /o-d "%CACHE%\*zatara-run-case*.exe" 2^>nul') do if not defined HELPER set "HELPER=%CACHE%\%%f"
 if not defined HELPER for /f "delims=" %%f in ('dir /b /a-d /o-d "%WORK%\*zatara-run-case*.exe" 2^>nul') do if not defined HELPER set "HELPER=%WORK%\%%f"
+rem The helper is best-effort only: fetched after a successful proxy fetch
+rem (the manifest was already downloaded then), never blocking - the
+rem buffered fallback below is a working lane without it.
+if not defined HELPER if defined VER if defined MANIFEST_OK call :fetch "%CACHE%" "zatara-run-case-!VER!-win-x64.exe" HELPER
 if defined HELPER (
   "%HELPER%"
   set "RC=!ERRORLEVEL!"
@@ -63,3 +95,80 @@ if defined HELPER (
 )
 del /q "%OUT%" 2>nul
 exit /b !RC!
+
+rem ---- subroutine: first version line wins -------------------------------
+rem %~1 strips the quotes at CALL-parse time, which is exactly why the
+rem assignment lives here: inside the for-block a raw %%v carrying quotes
+rem corrupts the block at phase-0 expansion.
+:setver
+if defined VER exit /b 0
+set "VER=%~1"
+exit /b 0
+
+rem ---- subroutine: fetch one release asset, hash-verified -----------------
+rem args: 1 cache dir, 2 asset name, 3 variable to receive the final path.
+rem The manifest is downloaded fresh every call and never reused from a
+rem previous call's file (a cached old manifest would list no new pinned
+rem asset forever). Bytes land in a .part file and are renamed to the final
+rem name ONLY after the sha256 matches; every failure path deletes its
+rem .part and sets WHY for the caller's visible notice.
+:fetch
+set "FDIR=%~1"
+set "FASET=%~2"
+if not exist "%FDIR%" mkdir "%FDIR%" 2>nul
+where curl.exe >nul 2>nul
+if errorlevel 1 (
+  set "WHY=curl.exe not found"
+  exit /b 1
+)
+curl.exe -fsSL --connect-timeout 10 -o "%FDIR%\manifest.json.part" "%BASE%/manifest.json"
+if errorlevel 1 (
+  del /q "%FDIR%\manifest.json.part" 2>nul
+  set "WHY=manifest download failed"
+  exit /b 1
+)
+move /y "%FDIR%\manifest.json.part" "%FDIR%\manifest.json" >nul
+set "MANIFEST_OK=1"
+set "SEEN="
+set "FSHA="
+for /f "usebackq delims=" %%l in ("%FDIR%\manifest.json") do (
+  set "LINE=%%l"
+  if defined SEEN if not defined FSHA (
+    set "HIT="
+    echo !LINE! | findstr /c:"sha256" >nul && set "HIT=1"
+    if defined HIT (
+      for /f "tokens=2 delims=:," %%h in ('echo !LINE!') do set "FSHA=%%~h"
+      set FSHA=!FSHA:"=!
+      set "FSHA=!FSHA: =!"
+      set "SEEN="
+    )
+  )
+  if not defined FSHA echo !LINE! | findstr /c:"!FASET!" >nul && set "SEEN=1"
+)
+if not defined FSHA (
+  set "WHY=!FASET! not listed in manifest.json"
+  exit /b 1
+)
+curl.exe -fsSL --connect-timeout 10 -o "%FDIR%\!FASET!.part" "%BASE%/!FASET!"
+if errorlevel 1 (
+  del /q "%FDIR%\!FASET!.part" 2>nul
+  set "WHY=download failed"
+  exit /b 1
+)
+set "GOT="
+for /f "skip=1 delims=" %%h in ('certutil -hashfile "%FDIR%\!FASET!.part" SHA256 2^>nul') do if not defined GOT set "GOT=%%h"
+set "GOT=!GOT: =!"
+if not defined GOT (
+  del /q "%FDIR%\!FASET!.part" 2>nul
+  set "WHY=certutil could not hash the download"
+  exit /b 1
+)
+if /i not "!GOT!"=="!FSHA!" (
+  del /q "%FDIR%\!FASET!.part" 2>nul
+  set "WHY=sha256 mismatch (manifest !FSHA! got !GOT!)"
+  exit /b 1
+)
+if exist "%FDIR%\!FASET!" del /q "%FDIR%\!FASET!" 2>nul
+move /y "%FDIR%\!FASET!.part" "%FDIR%\!FASET!" >nul
+set "%~3=%FDIR%\%~2"
+exit /b 0

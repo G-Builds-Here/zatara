@@ -1,0 +1,6 @@
+# Batch files are read CR-delimited by cmd.exe: an LF-only checkout is a
+# silently dead launcher. EOL is law here, not preference.
+*.cmd text eol=crlf
+# The unix twin is the mirror image: sh reads the shebang byte-wise, so a
+# CRLF checkout is a bad-interpreter death. LF is law here too.
+*.sh text eol=lf
