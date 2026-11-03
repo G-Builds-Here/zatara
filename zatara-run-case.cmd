@@ -4,8 +4,12 @@ rem templates point their command at this file. It ships at the extension
 rem package root (publish_sync mirrors it), the one location whose path a
 rem task can name without version knowledge; %~dp0 below is therefore this
 rem file's own directory, identical in the work-dir and installed layouts.
-rem The proxy lives beside it under binary-cache under a versioned asset
-rem name, so it is resolved here and the row's identity travels through the
+rem The proxy lives beside it under binary-cache, or - the layout every
+rem published session actually gets (owner-measured 2026-11-02):
+rem %LOCALAPPDATA%\Zed\extensions\work\zatara-netcoredbg\binary-cache,
+rem where the extension's own release downloader writes. Both caches are
+rem searched, package root first. Asset names are versioned, so the proxy
+rem is resolved here and the row's identity travels through the
 rem process environment (ZED_CUSTOM_csharp_* captures) as zero argv - no
 rem shell metacharacter ever reaches the pwsh -C composition line.
 rem
@@ -15,7 +19,7 @@ rem never carry it.
 rem
 rem Two output lanes, chosen by whether a console helper sits beside the
 rem proxy (zatara-run-case(.exe), resolved as the proxy's sibling first and
-rem from the cache second, where the extension caches the release asset
+rem from either cache second, where the extension caches the release asset
 rem zatara-run-case-{ver}-win-x64.exe):
 rem
 rem Live-stream lane (helper present): the console-subsystem helper reads
@@ -37,15 +41,18 @@ rem pre-block 0.
 setlocal EnableDelayedExpansion
 set "OUT=%TEMP%\zatara-run-case-%RANDOM%.out"
 set "CACHE=%~dp0binary-cache"
+set "WORK=%LOCALAPPDATA%\Zed\extensions\work\zatara-netcoredbg\binary-cache"
 if not "%ZATARA_PROXY_DEV%"=="" set "PROXY=%ZATARA_PROXY_DEV%"
 if not defined PROXY for /f "delims=" %%f in ('dir /b /a-d /o-d "%CACHE%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%CACHE%\%%f"
+if not defined PROXY for /f "delims=" %%f in ('dir /b /a-d /o-d "%WORK%\*zatara-proxy*.exe" 2^>nul') do if not defined PROXY set "PROXY=%WORK%\%%f"
 if not defined PROXY (
-  echo zatara run-case: no zatara-proxy*.exe in "%CACHE%" - reinstall the zatara extension, or set ZATARA_PROXY_DEV to a built proxy for development.
+  echo zatara run-case: no zatara-proxy*.exe in "%CACHE%" or "%WORK%" - Debug one test to download the binaries, or set ZATARA_PROXY_DEV to a built proxy for development.
   exit /b 2
 )
 set "HELPER="
 for %%P in ("%PROXY%") do if exist "%%~dpPzatara-run-case.exe" set "HELPER=%%~dpPzatara-run-case.exe"
 if not defined HELPER for /f "delims=" %%f in ('dir /b /a-d /o-d "%CACHE%\*zatara-run-case*.exe" 2^>nul') do if not defined HELPER set "HELPER=%CACHE%\%%f"
+if not defined HELPER for /f "delims=" %%f in ('dir /b /a-d /o-d "%WORK%\*zatara-run-case*.exe" 2^>nul') do if not defined HELPER set "HELPER=%WORK%\%%f"
 if defined HELPER (
   "%HELPER%"
   set "RC=!ERRORLEVEL!"
