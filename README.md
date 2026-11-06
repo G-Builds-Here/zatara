@@ -6,7 +6,7 @@ Run and debug .NET unit tests from the Zed editor gutter, powered by
 This README is the user's surface: what you need, how to install, how to use
 it, what you can configure, and what to do when a symptom appears.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-3a915d?style=flat-square)](#license)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3a915d?style=flat-square)](#license)
 [![Sponsor](https://img.shields.io/badge/sponsor-G--Builds--Here-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/G-Builds-Here)
 [![Cash App](https://img.shields.io/badge/Cash%20App-$GBuildsHere-00D632?style=flat-square&logo=cashapp&logoColor=white)](https://cash.app/$GBuildsHere)
 [![PayPal](https://img.shields.io/badge/PayPal-GBuildsHere-00457C?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/GBuildsHere)
@@ -730,4 +730,4 @@ landed.
 
 ## License
 
-MIT
+Apache-2.0; see [LICENSE](LICENSE).

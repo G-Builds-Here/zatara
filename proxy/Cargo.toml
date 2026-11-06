@@ -3,7 +3,7 @@ name = "zatara-proxy"
 version = "0.1.0"
 edition = "2021"
 description = "stdio DAP proxy: answers Zed on stdin/stdout and relays to a netcoredbg child (DR-1 spike)"
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 [dependencies]
 flate2 = "1"
