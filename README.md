@@ -1,6 +1,6 @@
 # zatara-netcoredbg
 
-Run and debug .NET unit tests from the Zed editor gutter, powered by
+Run and debug .NET programs and tests from the Zed editor gutter, powered by
 [netcoredbg](https://github.com/Samsung/netcoredbg).
 
 This README is the user's surface: what you need, how to install, how to use
