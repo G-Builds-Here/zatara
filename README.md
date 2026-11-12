@@ -1,7 +1,7 @@
 # zatara-netcoredbg
 
 Run and debug .NET programs and run tests from the Zed editor gutter, powered by
-[netcoredbg](https://github.com/Samsung/netcoredbg).
+[netcoredbg](https://github.com/Samsung/netcoredbg). with just one setting change in zed
 
 This README is the user's surface: what you need, how to install, how to use
 it, what you can configure, and what to do when a symptom appears.
